@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EM Board Quiz Platform</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f8f8f6; color: #1a1a1a; min-height: 100vh; }
+  input, textarea, button, select { font-family: inherit; }
+  input, textarea { outline: none; }
+  input:focus, textarea:focus { border-color: #185FA5 !important; box-shadow: 0 0 0 2px rgba(24,95,165,0.15); }
+  button { outline: none; }
+  button:active { transform: scale(0.98); }
+  code { font-family: monospace; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #f0f0ee; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+// ── CONFIG ── Replace with your Google Apps Script URL
+const BACKEND = "https://script.google.com/macros/s/AKfycbyQSvBTtEVLuCXIGBO314DWXYKXkk3X8wOe8Hf4xBugxsBP5vjLUrMBsIV0mfXchmix/exec";
+const ADMIN_STORAGE_KEY = "em_quiz_admin_code";
+const QUIZ_DURATION = 45 * 60;
+
+function api(body) {
+  return fetch(BACKEND + "?action=" + body.action, {
+    method: "POST", headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(body),
+  }).then(function(r) { return r.json(); });
+}
+
+function genCode() { return "EM" + Math.random().toString(36).substring(2,5).toUpperCase() + Math.floor(10+Math.random()*90); }
+
+function callClaude(messages, sys) {
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:8000, system:sys, messages:messages }),
+  }).then(function(r) { return r.json(); });
+}
+
+function parseArr(data) {
+  var raw = (data.content||[]).map(function(b){return b.text||"";}).join("");
+  var match = raw.match(/\[[\s\S]*/);
+  if (!match) throw new Error("No JSON array. Sample: "+raw.slice(0,200));
+  var str = match[0];
+  var lb = str.lastIndexOf("}");
+  if (lb!==-1) str = str.slice(0,lb+1)+"]";
+  str = str.replace(/,\s*([}\]])/g,"$1");
+  try { return JSON.parse(str); }
+  catch(e) {
+    var objs=[]; var re=/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g; var m;
+    while((m=re.exec(str))!==null){try{objs.push(JSON.parse(m[0]));}catch(e2){}}
+    if(objs.length) return objs;
+    throw new Error("Parse failed.");
+  }
+}
+
+function fmtTime(s) { return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0"); }
+
+const S = {
+  wrap: {maxWidth:820,margin:"0 auto",padding:"2rem 1rem"},
+  card: {background:"#fff",border:"1px solid #e8e6df",borderRadius:12,padding:"1.5rem",marginBottom:"1rem",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"},
+  h1: {fontSize:22,fontWeight:600,margin:"0 0 0.25rem"},
+  h2: {fontSize:18,fontWeight:600,margin:"0 0 1rem"},
+  h3: {fontSize:15,fontWeight:600,margin:"0 0 0.5rem"},
+  label: {fontSize:13,color:"#666",display:"block",marginBottom:4},
+  inp: {width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid #ddd",fontSize:14,background:"#fff",color:"#1a1a1a",transition:"border 0.2s"},
+  ta: {width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid #ddd",fontSize:14,minHeight:90,resize:"vertical",background:"#fff",color:"#1a1a1a"},
+  btn: {padding:"9px 20px",borderRadius:8,border:"1px solid #ddd",background:"#fff",cursor:"pointer",fontSize:14,color:"#1a1a1a",fontWeight:500,transition:"background 0.15s"},
+  btnP: {padding:"9px 20px",borderRadius:8,border:"none",background:"#185FA5",color:"#fff",cursor:"pointer",fontSize:14,fontWeight:600,transition:"background 0.15s"},
+  btnS: {padding:"5px 12px",borderRadius:6,border:"1px solid #ddd",background:"#fff",cursor:"pointer",fontSize:13,color:"#444",transition:"background 0.15s"},
+  bdg: function(c){
+    var bg={blue:"#E6F1FB",green:"#EAF3DE",amber:"#FAEEDA",red:"#FCEBEB",gray:"#F1EFE8"};
+    var fg={blue:"#185FA5",green:"#3B6D11",amber:"#854F0B",red:"#A32D2D",gray:"#5F5E5A"};
+    return {display:"inline-block",padding:"3px 10px",borderRadius:20,fontSize:12,fontWeight:600,background:bg[c]||bg.gray,color:fg[c]||fg.gray};
+  },
+  muted: {fontSize:13,color:"#666"},
+  prog: {height:6,borderRadius:4,background:"#eee",overflow:"hidden",margin:"0.5rem 0 1rem"},
+  bar: function(p,c){return{height:"100%",width:p+"%",background:c||"#185FA5",borderRadius:4,transition:"width 0.4s"};},
+  opt: function(sel){return{display:"block",width:"100%",textAlign:"left",padding:"10px 14px",borderRadius:8,border:"1.5px solid "+(sel?"#185FA5":"#ddd"),background:sel?"#EBF3FB":"#fff",cursor:"pointer",fontSize:14,color:sel?"#185FA5":"#1a1a1a",marginBottom:6,fontWeight:sel?500:400,transition:"all 0.15s"};},
+  th: {padding:"10px 12px",fontSize:13,fontWeight:600,textAlign:"left",borderBottom:"1px solid #eee",color:"#666",whiteSpace:"nowrap",background:"#f8f8f6"},
+  td: {padding:"10px 12px",fontSize:13,borderBottom:"1px solid #f0f0ee",verticalAlign:"middle"},
+  err: {color:"#A32D2D",fontSize:13,marginBottom:8,padding:"8px 12px",background:"#FCEBEB",borderRadius:6},
+};
+
+function Timer(props) {
+  var st=useState(QUIZ_DURATION); var left=st[0]; var setLeft=st[1];
+  useEffect(function(){
+    if(left<=0){props.onExpire();return;}
+    var t=setTimeout(function(){setLeft(function(l){return l-1;});},1000);
+    return function(){clearTimeout(t);};
+  },[left]);
+  var color=left<300?"#A32D2D":left<600?"#854F0B":"#185FA5";
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:10}}>
+      <div style={{fontSize:18,fontWeight:700,color:color,fontVariantNumeric:"tabular-nums",letterSpacing:1}}>{fmtTime(left)}</div>
+      <div style={{width:80,height:5,borderRadius:4,background:"#eee",overflow:"hidden"}}>
+        <div style={S.bar(Math.round((left/QUIZ_DURATION)*100),color)}/>
+      </div>
+    </div>
+  );
+}
+
+function ScoreBadge(props) {
+  var pct=props.pct;
+  if(pct===null||pct===undefined) return <span style={{color:"#999"}}>—</span>;
+  return <span style={S.bdg(pct>=70?"green":pct>=50?"amber":"red")}>{pct}%</span>;
+}
+
+function DataTable(props) {
+  var ths=props.ths; var rows=props.rows; var foot=props.foot;
+  return (
+    <div style={{overflowX:"auto",borderRadius:10,border:"1px solid #e8e6df",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",background:"#fff"}}>
+        <thead><tr>{ths.map(function(h,i){return <th key={i} style={Object.assign({},S.th,h.right?{textAlign:"right"}:{})}>{h.label}</th>;})}</tr></thead>
+        <tbody>{rows.map(function(row,i){
+          return <tr key={i} style={{background:i%2===0?"#fff":"#fafaf8"}}>{row.map(function(cell,j){return <td key={j} style={Object.assign({},S.td,ths[j]&&ths[j].right?{textAlign:"right"}:{},cell.bold?{fontWeight:600}:{})}>{cell.content}</td>;})}</tr>;
+        })}</tbody>
+        {foot&&<tfoot><tr style={{background:"#f0f0ee"}}>{foot.map(function(cell,i){return <td key={i} colSpan={cell.span||1} style={Object.assign({},S.td,{fontWeight:600},ths[i]&&ths[i].right?{textAlign:"right"}:{})}>{cell.content}</td>;})}</tr></tfoot>}
+      </table>
+    </div>
+  );
+}
+
+function App() {
+  var s1=useState(function(){
+    var search=window.location.search||"";
+    if(search.indexOf("page=take")!==-1) return "studentEntry";
+    if(search.indexOf("page=results")!==-1) return "checkResults";
+    return "home";
+  }); var view=s1[0]; var setView=s1[1];
+  var s2=useState(null); var adminPassword=s2[0]; var setAdminPassword=s2[1];
+  var s3=useState(true); var loading=s3[0]; var setLoading=s3[1];
+  var s4=useState(1); var setupStep=s4[0]; var setSetupStep=s4[1];
+  var s5=useState(""); var setupCode=s5[0]; var setSetupCode=s5[1];
+  var s6=useState(""); var setupConfirm=s6[0]; var setSetupConfirm=s6[1];
+  var s7=useState(""); var setupError=s7[0]; var setSetupError=s7[1];
+  var s8=useState(1); var changeStep=s8[0]; var setChangeStep=s8[1];
+  var s9=useState(""); var changeOld=s9[0]; var setChangeOld=s9[1];
+  var s10=useState(""); var changeNew=s10[0]; var setChangeNew=s10[1];
+  var s11=useState(""); var changeConfirm=s11[0]; var setChangeConfirm=s11[1];
+  var s12=useState(""); var changeError=s12[0]; var setChangeError=s12[1];
+  var s13=useState(false); var changeSuccess=s13[0]; var setChangeSuccess=s13[1];
+  var s14=useState(null); var quiz=s14[0]; var setQuiz=s14[1];
+  var s15=useState([]); var archived=s15[0]; var setArchived=s15[1];
+  var s16=useState(null); var viewingArchive=s16[0]; var setViewingArchive=s16[1];
+  var s17=useState(false); var generating=s17[0]; var setGenerating=s17[1];
+  var s18=useState(0); var genProgress=s18[0]; var setGenProgress=s18[1];
+  var s19=useState(""); var genStatus=s19[0]; var setGenStatus=s19[1];
+  var s20=useState(""); var pdfText=s20[0]; var setPdfText=s20[1];
+  var s21=useState(""); var quizTitle=s21[0]; var setQuizTitle=s21[1];
+  var s22=useState([]); var residents=s22[0]; var setResidents=s22[1];
+  var s23=useState(""); var newResName=s23[0]; var setNewResName=s23[1];
+  var s24=useState(""); var newResEmail=s24[0]; var setNewResEmail=s24[1];
+  var s25=useState([]); var submissions=s25[0]; var setSubmissions=s25[1];
+  var s26=useState({}); var currentAnswers=s26[0]; var setCurrentAnswers=s26[1];
+  var s27=useState(null); var submittedId=s27[0]; var setSubmittedId=s27[1];
+  var s28=useState(false); var resultsReleased=s28[0]; var setResultsReleased=s28[1];
+  var s29=useState(""); var studentResCode=s29[0]; var setStudentResCode=s29[1];
+  var s30=useState(""); var studentQuizCode=s30[0]; var setStudentQuizCode=s30[1];
+  var s31=useState(""); var entryError=s31[0]; var setEntryError=s31[1];
+  var s32=useState(""); var adminCode=s32[0]; var setAdminCode=s32[1];
+  var s33=useState(""); var adminError=s33[0]; var setAdminError=s33[1];
+  var s34=useState("questions"); var activeTab=s34[0]; var setActiveTab=s34[1];
+  var s35=useState(false); var marking=s35[0]; var setMarking=s35[1];
+  var s36=useState(0); var markProgress=s36[0]; var setMarkProgress=s36[1];
+  var s37=useState(""); var resCodeLookup=s37[0]; var setResCodeLookup=s37[1];
+  var s38=useState(""); var lookupError=s38[0]; var setLookupError=s38[1];
+  var fileRef=useRef();
+
+  var mcqs=quiz&&quiz.questions?quiz.questions.filter(function(q){return q.type==="mcq";}):[]; 
+  var saqs=quiz&&quiz.questions?quiz.questions.filter(function(q){return q.type==="saq";}):[]; 
+  var maxMCQ=mcqs.length*2; 
+  var maxSAQ=saqs.reduce(function(a,q){return a+q.marks;},0); 
+  var maxTotal=maxMCQ+maxSAQ;
+  var currentSub=submissions.find(function(s){return s.id===submittedId;});
+  var activeResident=residents.find(function(r){return r.residentCode===studentResCode;});
+
+  function parseSub(s) {
+    return Object.assign({},s,{
+      answers:typeof s.answers==="string"?JSON.parse(s.answers||"{}"):s.answers,
+      saqScores:typeof s.saqScores==="string"?JSON.parse(s.saqScores||"{}"):s.saqScores,
+      saqFeedback:typeof s.saqFeedback==="string"?JSON.parse(s.saqFeedback||"{}"):s.saqFeedback,
+    });
+  }
+
+  function refreshSubmissions() {
+    return api({action:"getSubmissions"}).then(function(r){
+      if(r.ok&&r.submissions) setSubmissions(r.submissions.map(parseSub));
+    }).catch(function(){});
+  }
+
+  useEffect(function(){
+    var savedCode = localStorage.getItem(ADMIN_STORAGE_KEY);
+    if(savedCode) setAdminPassword(savedCode);
+    Promise.all([
+      api({action:"getQuiz"}).then(function(r){if(r.ok&&r.quizData)setQuiz(JSON.parse(r.quizData));}).catch(function(){}),
+      api({action:"getResidents"}).then(function(r){if(r.ok&&r.residents)setResidents(JSON.parse(r.residents));}).catch(function(){}),
+      api({action:"getSubmissions"}).then(function(r){if(r.ok&&r.submissions)setSubmissions(r.submissions.map(parseSub));}).catch(function(){}),
+      api({action:"getReleased"}).then(function(r){if(r.ok)setResultsReleased(r.released==="true");}).catch(function(){}),
+      api({action:"getArchived"}).then(function(r){if(r.ok&&r.archived)setArchived(JSON.parse(r.archived));}).catch(function(){}),
+    ]).finally(function(){setLoading(false);});
+  },[]);
+
+  function handlePdfUpload(e) {
+    var file=e.target.files[0]; if(!file)return;
+    setGenStatus("Loading PDF..."); setGenerating(true); setGenProgress(5);
+    var loadScript=new Promise(function(res,rej){
+      if(window.pdfjsLib){res();return;}
+      var sc=document.createElement("script");
+      sc.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+      sc.onload=res; sc.onerror=rej; document.head.appendChild(sc);
+    });
+    loadScript.then(function(){
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      return file.arrayBuffer();
+    }).then(function(ab){return window.pdfjsLib.getDocument({data:ab}).promise;})
+    .then(function(pdf){
+      var pc=Math.min(pdf.numPages,60); var i=1;
+      function nextPage(text){
+        if(i>pc)return Promise.resolve(text);
+        var idx=i++;
+        return pdf.getPage(idx).then(function(pg){return pg.getTextContent();}).then(function(tc){
+          var t=text+tc.items.map(function(x){return x.str;}).join(" ")+"\n";
+          setGenProgress(5+Math.round((idx/pc)*20));
+          return nextPage(t);
+        });
+      }
+      return nextPage("");
+    }).then(function(text){
+      setPdfText(text.slice(0,30000));
+      if(!quizTitle)setQuizTitle(file.name.replace(".pdf",""));
+      setGenStatus("PDF loaded successfully");
+    }).catch(function(err){setGenStatus("Failed: "+err.message);})
+    .finally(function(){setGenerating(false);});
+  }
+
+  function generateQuiz() {
+    if(!pdfText)return;
+    setGenerating(true); setGenProgress(5);
+    var base="You are a senior Emergency Medicine board examiner creating questions at ABEM/FCEM level for EM residents.\nRULES: 80% from chapter text (facts, tables, algorithms, figures). 20% from recent landmark trials/ACEP guidelines.\nVignettes must include chief complaint, vitals, key exam/investigation findings. Distractors must be plausible.\nquestionSubtype: vignette | factual | table_algorithm | graphic";
+    var mcqSys=base+"\nEach MCQ = 2 marks. Return ONLY a valid JSON array of exactly 10 MCQ objects, no markdown:\n[{\"id\":\"q1\",\"type\":\"mcq\",\"questionSubtype\":\"vignette\",\"text\":\"...\",\"options\":[\"A. ...\",\"B. ...\",\"C. ...\",\"D. ...\"],\"answer\":\"A\",\"explanation\":\"Full explanation.\"}]\nGenerate EXACTLY 10 MCQs.";
+    var saqSys=base+"\nEach SAQ: max 2 subsections (a)(b), total marks 4-6, brief structured answers (3-5 bullet points per subsection). Return ONLY a valid JSON array of exactly 5 SAQ objects, no markdown:\n[{\"id\":\"s1\",\"type\":\"saq\",\"questionSubtype\":\"algorithm\",\"text\":\"Question with (a)(b)\",\"totalMarks\":5,\"sampleAnswer\":\"(a)...[3m]\\n(b)...[2m]\",\"markingCriteria\":\"(a) 1 mark each for: x,y,z\",\"explanation\":\"Concise explanation.\"}]\nGenerate EXACTLY 5 SAQs.";
+    var mcqBatches=[
+      {label:"MCQs 1-10",prompt:"Generate MCQs 1-10: ALL 10 must be clinical vignette type with full patient presentation, vitals, exam findings."},
+      {label:"MCQs 11-20",prompt:"Generate MCQs 11-20: ALL 10 must be factual testing thresholds, criteria, classifications, drug doses from the chapter."},
+      {label:"MCQs 21-30",prompt:"Generate MCQs 21-30: ALL 10 based on tables, scoring systems, diagnostic criteria, algorithms from the chapter."},
+      {label:"MCQs 31-40",prompt:"Generate MCQs 31-40: 4 graphic/image-based (ECG, X-ray, lab pattern) and 6 additional clinical vignettes."},
+    ];
+    var saqBatches=[
+      {label:"SAQs 1-5",prompt:"Generate exactly 5 concise board-level EM SAQs. Each: exactly 2 subsections (a)(b), total marks 4-6. Focus on management and clinical decisions."},
+      {label:"SAQs 6-10",prompt:"Generate exactly 5 concise board-level EM SAQs. Each: exactly 2 subsections (a)(b), total marks 4-6. Focus on investigations, differentials, evidence-based treatment. Different topics from SAQs 1-5."},
+    ];
+    var allMCQs=[]; var allSAQs=[];
+    var totalSteps=mcqBatches.length+saqBatches.length;
+    function runBatches(batches,sys,collector,offset){
+      var chain=Promise.resolve();
+      batches.forEach(function(batch,i){
+        chain=chain.then(function(){
+          var step=offset+i+1;
+          setGenStatus("Generating "+batch.label+" ("+step+"/"+totalSteps+")...");
+          setGenProgress(Math.round((step/(totalSteps+1))*90));
+          return callClaude([{role:"user",content:batch.prompt+"\n\nCHAPTER:\n"+pdfText}],sys)
+            .then(function(data){
+              if(data.error)throw new Error(data.error.message);
+              parseArr(data).forEach(function(q){collector.push(q);});
+            });
+        });
+      });
+      return chain;
+    }
+    runBatches(mcqBatches,mcqSys,allMCQs,0)
+      .then(function(){return runBatches(saqBatches,saqSys,allSAQs,mcqBatches.length);})
+      .then(function(){
+        var questions=allMCQs.slice(0,40).map(function(q,i){return Object.assign({},q,{id:"q"+(i+1),type:"mcq",marks:2});})
+          .concat(allSAQs.slice(0,10).map(function(q,i){return Object.assign({},q,{id:"s"+(i+1),type:"saq",marks:q.totalMarks||5});}));
+        if(!questions.length)throw new Error("No questions generated.");
+        var code="QUIZ"+Math.random().toString(36).substring(2,7).toUpperCase();
+        var newQuiz={title:quizTitle||"Medical Quiz",questions:questions,code:code,published:false};
+        setQuiz(newQuiz);
+        api({action:"saveQuiz",quizData:JSON.stringify(newQuiz)}).catch(function(){});
+        setGenProgress(100);
+        setGenStatus("Done! "+questions.filter(function(q){return q.type==="mcq";}).length+" MCQs + "+questions.filter(function(q){return q.type==="saq";}).length+" SAQs generated.");
+        setView("adminDashboard");
+      })
+      .catch(function(err){setGenStatus("Error: "+(err.message||String(err)));})
+      .finally(function(){setGenerating(false);});
+  }
+
+  function addResident() {
+    if(!newResName.trim()||!newResEmail.trim())return;
+    var updated=residents.concat([{name:newResName.trim(),email:newResEmail.trim(),residentCode:genCode()}]);
+    setResidents(updated);
+    api({action:"saveResidents",residents:JSON.stringify(updated)}).catch(function(){});
+    setNewResName(""); setNewResEmail("");
+  }
+
+  function removeResident(code) {
+    var updated=residents.filter(function(x){return x.residentCode!==code;});
+    setResidents(updated);
+    api({action:"saveResidents",residents:JSON.stringify(updated)}).catch(function(){});
+  }
+
+  function submitQuiz() {
+    var mcqScore=0;
+    mcqs.forEach(function(q){
+      var ans=(currentAnswers[q.id]||"").trim().toUpperCase().charAt(0);
+      var correct=(q.answer||"").trim().toUpperCase().charAt(0);
+      if(ans&&ans===correct)mcqScore+=2;
+    });
+    var sid="S"+Date.now();
+    var sub={id:sid,residentCode:activeResident.residentCode,name:activeResident.name,email:activeResident.email,answers:currentAnswers,submitted:new Date().toLocaleString(),mcqScore:mcqScore,saqScores:{},saqFeedback:{},totalScore:null,maxScore:null};
+    setSubmissions(function(s){return s.concat([sub]);});
+    api({action:"submitAnswers",id:sid,residentCode:activeResident.residentCode,name:activeResident.name,email:activeResident.email,submitted:sub.submitted,answers:JSON.stringify(currentAnswers),mcqScore:mcqScore}).catch(function(){});
+    setSubmittedId(sid);
+    setView("submitted");
+  }
+
+  function markSAQs() {
+    if(!submissions.length)return;
+    setMarking(true); setMarkProgress(0);
+    var updated=submissions.slice();
+    var chain=Promise.resolve();
+    updated.forEach(function(sub,si){
+      chain=chain.then(function(){
+        setMarkProgress(Math.round((si/updated.length)*90));
+        var saqList=saqs.map(function(q,i){return "SAQ "+(i+1)+" [id:"+q.id+"] [totalMarks:"+q.marks+"]\nQ: "+q.text+"\nSample: "+q.sampleAnswer+"\nCriteria: "+q.markingCriteria+"\nStudent: "+(sub.answers[q.id]||"(no answer)");}).join("\n\n---\n\n");
+        var sys="Senior EM board examiner. Mark each SAQ out of its totalMarks. Return ONLY JSON array:\n[{\"id\":\"q_id\",\"score\":0,\"feedback\":\"constructive feedback\"}]";
+        return callClaude([{role:"user",content:"Mark "+saqs.length+" SAQs:\n\n"+saqList}],sys)
+          .then(function(data){
+            if(data.error)throw new Error(data.error.message);
+            var results=parseArr(data);
+            results.forEach(function(r){sub.saqScores[r.id]=typeof r.score==="number"?r.score:0;sub.saqFeedback[r.id]=r.feedback||"";});
+            saqs.forEach(function(q){if(sub.saqScores[q.id]===undefined){sub.saqScores[q.id]=0;sub.saqFeedback[q.id]="Not marked.";}});
+          })
+          .catch(function(err){saqs.forEach(function(q){sub.saqScores[q.id]=0;sub.saqFeedback[q.id]="Error: "+err.message;});})
+          .finally(function(){
+            var saqTotal=Object.values(sub.saqScores).reduce(function(a,b){return a+b;},0);
+            sub.totalScore=sub.mcqScore+saqTotal; sub.maxScore=maxTotal;
+            updated[si]=sub; setSubmissions(updated.slice());
+            api({action:"updateMarking",id:sub.id,saqScores:JSON.stringify(sub.saqScores),saqFeedback:JSON.stringify(sub.saqFeedback),totalScore:sub.totalScore,maxScore:sub.maxScore}).catch(function(){});
+          });
+      });
+    });
+    chain.finally(function(){setMarkProgress(100);setMarking(false);});
+  }
+
+  function archiveQuiz() {
+    var newArchived=archived.concat([{quiz:Object.assign({},quiz),submissions:submissions.slice(),residents:residents.slice(),archivedAt:new Date().toLocaleString()}]);
+    setArchived(newArchived); setQuiz(null); setSubmissions([]); setResultsReleased(false); setResidents([]);
+    setActiveTab("questions"); setView("adminDashboard");
+    api({action:"saveArchived",archived:JSON.stringify(newArchived)}).catch(function(){});
+    api({action:"deleteQuiz"}).catch(function(){});
+    api({action:"clearSubmissions"}).catch(function(){});
+    api({action:"saveResidents",residents:"[]"}).catch(function(){});
+    api({action:"saveReleased",released:"false"}).catch(function(){});
+  }
+
+  function downloadResultsPDF() {
+    var saqT=Object.values(currentSub.saqScores).reduce(function(a,b){return a+b;},0);
+    var total=currentSub.mcqScore+saqT;
+    var pct=Math.round((total/maxTotal)*100);
+    var lines=[];
+    function line(txt,size,bold,color){lines.push({txt:txt||"",size:size||11,bold:!!bold,color:color||"#1a1a1a"});}
+    function blank(){lines.push(null);}
+    line(quiz.title,18,true); line("Results Report",13,false,"#555"); blank();
+    line("Resident: "+currentSub.name+"   |   Code: "+currentSub.residentCode,11);
+    line("Email: "+currentSub.email+"   |   Submitted: "+currentSub.submitted,11); blank();
+    line("SCORE SUMMARY",12,true);
+    line("MCQ Score:   "+currentSub.mcqScore+" / "+maxMCQ,11);
+    line("SAQ Score:   "+saqT+" / "+maxSAQ,11);
+    line("Total Score: "+total+" / "+maxTotal+"   ("+pct+"%)",12,true,pct>=70?"#3B6D11":pct>=50?"#854F0B":"#A32D2D");
+    blank(); line("─────────────────────────────────────────",9,false,"#ccc");
+    line("SECTION A — MCQ REVIEW",12,true); blank();
+    mcqs.forEach(function(q,i){
+      var ans=(currentSub.answers[q.id]||"").trim().toUpperCase().charAt(0);
+      var correct=ans===q.answer.trim().toUpperCase().charAt(0);
+      line("Q"+(i+1)+". "+q.text,10,true);
+      line((correct?"✓ Correct":"✗ Incorrect")+"   Your answer: "+(currentSub.answers[q.id]||"—")+(correct?"":"   Correct: "+q.answer),10,false,correct?"#3B6D11":"#A32D2D");
+      if(q.explanation)line("Explanation: "+q.explanation,9,false,"#444");
+      blank();
+    });
+    line("─────────────────────────────────────────",9,false,"#ccc");
+    line("SECTION B — SAQ FEEDBACK",12,true); blank();
+    saqs.forEach(function(q,i){
+      var sc=currentSub.saqScores[q.id];
+      line("SAQ "+(i+1)+". "+q.text,10,true);
+      line("Score: "+(sc!==undefined?sc:"—")+" / "+q.marks+" marks",10,false,"#185FA5");
+      line("Your answer: "+(currentSub.answers[q.id]||"(no answer)"),9,false,"#444");
+      if(currentSub.saqFeedback[q.id])line("Feedback: "+currentSub.saqFeedback[q.id],9,false,"#185FA5");
+      if(q.explanation)line("Model answer: "+q.explanation,9,false,"#444");
+      blank();
+    });
+    var canvas=document.createElement("canvas");
+    var margin=50; var pageW=794; var maxW=pageW-margin*2;
+    canvas.width=pageW;
+    var ctx=canvas.getContext("2d");
+    function wrapText(ctx,text,maxWidth,size){
+      var words=text.split(" "); var wrapped=[]; var cur="";
+      ctx.font=size+"px Arial";
+      words.forEach(function(w){var test=cur?cur+" "+w:w;if(ctx.measureText(test).width>maxWidth){if(cur)wrapped.push(cur);cur=w;}else cur=test;});
+      if(cur)wrapped.push(cur);
+      return wrapped;
+    }
+    var totalH=margin;
+    lines.forEach(function(l){if(!l){totalH+=9;return;}totalH+=wrapText(ctx,l.txt,maxW,l.size).length*(l.size*1.5);});
+    totalH+=margin; canvas.height=totalH;
+    ctx.fillStyle="#fff"; ctx.fillRect(0,0,pageW,totalH);
+    ctx.fillStyle="#185FA5"; ctx.fillRect(0,0,pageW,6);
+    var y=margin+6;
+    lines.forEach(function(l){
+      if(!l){y+=9;return;}
+      ctx.font=(l.bold?"bold ":"")+l.size+"px Arial"; ctx.fillStyle=l.color;
+      wrapText(ctx,l.txt,maxW,l.size).forEach(function(row){ctx.fillText(row,margin,y);y+=l.size*1.5;});
+    });
+    ctx.fillStyle="#185FA5"; ctx.fillRect(0,totalH-4,pageW,4);
+    ctx.font="9px Arial"; ctx.fillStyle="#888";
+    ctx.fillText("EM Board Quiz Platform   |   "+new Date().toLocaleDateString(),margin,totalH-10);
+    canvas.toBlob(function(blob){
+      var url=URL.createObjectURL(blob); var a=document.createElement("a");
+      a.href=url; a.download=(currentSub.name+"_"+quiz.title+"_results").replace(/\s+/g,"_")+".png";
+      a.click(); URL.revokeObjectURL(url);
+    },"image/png");
+  }
+
+  function getPageUrl(page) {
+    return window.location.origin + window.location.pathname + "?page=" + page;
+  }
+
+  function copyToClipboard(text) {
+    var el=document.createElement("textarea"); el.value=text;
+    document.body.appendChild(el); el.select(); document.execCommand("copy"); document.body.removeChild(el);
+  }
+
+  // ═══════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════
+
+  if(loading) return (
+    <div style={{textAlign:"center",paddingTop:"5rem",color:"#666"}}>
+      <div style={{fontSize:32,marginBottom:16}}>⚕</div>
+      <div style={{fontSize:16,fontWeight:500,marginBottom:8}}>EM Board Quiz Platform</div>
+      <div style={{fontSize:14}}>Loading...</div>
+    </div>
+  );
+
+  // Setup wizard
+  if(!adminPassword&&view==="adminLogin") return (
+    <div style={S.wrap}>
+      <div style={S.card}>
+        <div style={Object.assign({},S.bdg("blue"),{marginBottom:16})}>First-time setup</div>
+        <h2 style={S.h2}>Create your admin code</h2>
+        <p style={Object.assign({},S.muted,{marginBottom:16})}>Choose a secure code (min 6 characters). It will be saved to this browser.</p>
+        {setupStep===1&&<div>
+          <label style={S.label}>Choose an admin code</label>
+          <input style={Object.assign({},S.inp,{marginBottom:8})} type="password" placeholder="Min 6 characters" value={setupCode} onChange={function(e){setSetupCode(e.target.value);}} />
+          {setupError&&<div style={S.err}>{setupError}</div>}
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button style={S.btn} onClick={function(){setView("home");}}>Back</button>
+            <button style={S.btnP} onClick={function(){if(setupCode.length<6){setSetupError("Min 6 characters.");return;}setSetupError("");setSetupStep(2);}}>Continue</button>
+          </div>
+        </div>}
+        {setupStep===2&&<div>
+          <label style={S.label}>Confirm your admin code</label>
+          <input style={Object.assign({},S.inp,{marginBottom:8})} type="password" placeholder="Re-enter your code" value={setupConfirm} onChange={function(e){setSetupConfirm(e.target.value);}} />
+          {setupError&&<div style={S.err}>{setupError}</div>}
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button style={S.btn} onClick={function(){setSetupStep(1);}}>Back</button>
+            <button style={S.btnP} onClick={function(){
+              if(setupConfirm!==setupCode){setSetupError("Codes don't match.");return;}
+              localStorage.setItem(ADMIN_STORAGE_KEY,setupCode);
+              setAdminPassword(setupCode);
+              setSetupCode("");setSetupConfirm("");setSetupError("");setSetupStep(1);
+              setView(quiz?"adminDashboard":"upload");
+            }}>Set admin code</button>
+          </div>
+        </div>}
+      </div>
+    </div>
+  );
+
+  if(view==="home") return (
+    <div style={S.wrap}>
+      <div style={{textAlign:"center",padding:"3rem 0 2rem"}}>
+        <div style={{fontSize:40,marginBottom:12}}>⚕</div>
+        <h1 style={{fontSize:28,fontWeight:700,marginBottom:8}}>EM Board Quiz Platform</h1>
+        <p style={{fontSize:15,color:"#666",maxWidth:420,margin:"0 auto 2.5rem"}}>AI-powered board-level quizzes for Emergency Medicine residents.</p>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,maxWidth:560,margin:"0 auto"}}>
+        <div style={Object.assign({},S.card,{cursor:"pointer",textAlign:"center",padding:"2rem"})} onClick={function(){setView("adminLogin");}}>
+          <div style={{fontSize:28,marginBottom:12}}>🎓</div>
+          <div style={{fontWeight:600,fontSize:16,marginBottom:6}}>Educator</div>
+          <div style={{fontSize:13,color:"#666"}}>Create and manage quizzes</div>
+        </div>
+        <div style={Object.assign({},S.card,{cursor:"pointer",textAlign:"center",padding:"2rem"})} onClick={function(){setView("studentEntry");}}>
+          <div style={{fontSize:28,marginBottom:12}}>📝</div>
+          <div style={{fontWeight:600,fontSize:16,marginBottom:6}}>Resident</div>
+          <div style={{fontSize:13,color:"#666"}}>Take a 45-minute quiz</div>
+        </div>
+      </div>
+      <div style={{textAlign:"center",marginTop:20}}>
+        <button style={S.btnS} onClick={function(){setView("checkResults");}}>Check my results</button>
+      </div>
+    </div>
+  );
+
+  if(view==="adminLogin") return (
+    <div style={S.wrap}>
+      <div style={S.card}>
+        <h2 style={S.h2}>Admin access</h2>
+        <label style={S.label}>Admin code</label>
+        <input style={Object.assign({},S.inp,{marginBottom:8})} type="password" placeholder="Enter admin code" value={adminCode} onChange={function(e){setAdminCode(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter"){if(adminCode===adminPassword){setView(quiz?"adminDashboard":"upload");setAdminError("");}else setAdminError("Incorrect code.");}}} />
+        {adminError&&<div style={S.err}>{adminError}</div>}
+        <div style={{display:"flex",gap:8,marginTop:8}}>
+          <button style={S.btn} onClick={function(){setView("home");}}>Back</button>
+          <button style={S.btnP} onClick={function(){if(adminCode===adminPassword){setView(quiz?"adminDashboard":"upload");setAdminError("");}else setAdminError("Incorrect code.");}}>Continue</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  if(view==="upload") return (
+    <div style={S.wrap}>
+      <div style={S.card}>
+        <h2 style={S.h2}>Upload chapter PDF</h2>
+        <label style={S.label}>Quiz title</label>
+        <input style={Object.assign({},S.inp,{marginBottom:12})} placeholder="e.g. Airway Management — Chapter 4" value={quizTitle} onChange={function(e){setQuizTitle(e.target.value);}} />
+        <label style={S.label}>PDF file</label>
+        <div style={{border:"2px dashed #ddd",borderRadius:8,padding:"2rem",textAlign:"center",marginBottom:12,cursor:"pointer",transition:"border 0.2s"}} onClick={function(){fileRef.current.click();}}>
+          <div style={{fontSize:24,marginBottom:8}}>📄</div>
+          <div style={{fontSize:14,color:"#666"}}>{pdfText?"PDF loaded — ready to generate":"Click to select PDF (up to 60 pages)"}</div>
+          <input ref={fileRef} type="file" accept=".pdf" style={{display:"none"}} onChange={handlePdfUpload} />
+        </div>
+        {(generating||genStatus)&&<div style={{marginBottom:12}}>
+          <div style={Object.assign({},S.muted,{marginBottom:4})}>{genStatus}</div>
+          {generating&&<div style={S.prog}><div style={S.bar(genProgress)}/></div>}
+        </div>}
+        {pdfText&&!generating&&<div style={Object.assign({},S.bdg("green"),{marginBottom:12})}>✓ PDF loaded — {Math.round(pdfText.length/1000)}k characters extracted</div>}
+        <div style={{display:"flex",gap:8}}>
+          <button style={S.btn} onClick={function(){setView("adminDashboard");}}>Back</button>
+          <button style={Object.assign({},S.btnP,{opacity:(!pdfText||generating)?0.5:1})} disabled={!pdfText||generating} onClick={generateQuiz}>{generating?"Generating questions...":"Generate quiz (40 MCQs + 10 SAQs)"}</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  if(view==="adminDashboard") {
+    if(!quiz) return (
+      <div style={S.wrap}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <h1 style={S.h1}>Admin dashboard</h1>
+          <button style={S.btnS} onClick={function(){setView("home");}}>Home</button>
+        </div>
+        <div style={S.card}>
+          <div style={{fontWeight:600,marginBottom:6}}>No active quiz</div>
+          <p style={Object.assign({},S.muted,{marginBottom:12})}>Upload a chapter PDF to create a new quiz.</p>
+          <button style={S.btnP} onClick={function(){setPdfText("");setQuizTitle("");setGenStatus("");setView("upload");}}>Create new quiz</button>
+        </div>
+        {archived.length>0&&<div>
+          <div style={{fontWeight:600,fontSize:15,marginBottom:10}}>Archived quizzes ({archived.length})</div>
+          {archived.map(function(entry,idx){return(
+            <div key={idx} style={Object.assign({},S.card,{marginBottom:8})}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div><div style={{fontWeight:500}}>{entry.quiz.title}</div><div style={S.muted}>{entry.submissions.length} submissions · Archived {entry.archivedAt}</div></div>
+                <button style={S.btnS} onClick={function(){setViewingArchive(idx);setView("archiveDetail");}}>View</button>
+              </div>
+            </div>);})}
+        </div>}
+      </div>
+    );
+
+    var tabs=["questions","residents","results","release","archive","settings"];
+    return (
+      <div style={S.wrap}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+          <div>
+            <h1 style={S.h1}>{quiz.title}</h1>
+            <div style={{display:"flex",gap:8,marginTop:6,flexWrap:"wrap",alignItems:"center"}}>
+              <span style={S.bdg(quiz.published?"green":"amber")}>{quiz.published?"Published":"Draft"}</span>
+              <span style={S.muted}>Code: <strong>{quiz.code}</strong></span>
+              <span style={S.muted}>{mcqs.length} MCQs ({maxMCQ}m) · {saqs.length} SAQs ({maxSAQ}m) · Total: {maxTotal}m</span>
+            </div>
+          </div>
+          <button style={S.btnS} onClick={function(){setView("home");}}>Home</button>
+        </div>
+        <div style={{display:"flex",gap:6,marginBottom:16,borderBottom:"1px solid #eee",paddingBottom:12,flexWrap:"wrap"}}>
+          {tabs.map(function(t){
+            var label=t==="archive"?"Archive"+(archived.length>0?" ("+archived.length+")":"")
+              :t==="residents"?"Residents"+(residents.length>0?" ("+residents.length+")":"")
+              :t==="results"?"Results"+(submissions.length>0?" ("+submissions.length+")":"")
+              :t.charAt(0).toUpperCase()+t.slice(1);
+            return <button key={t} style={Object.assign({},S.btnS,activeTab===t?{borderColor:"#185FA5",color:"#185FA5",background:"#EBF3FB"}:{})} onClick={function(){setActiveTab(t);}}>{label}</button>;
+          })}
+        </div>
+
+        {activeTab==="questions"&&<div>
+          <div style={Object.assign({},S.muted,{marginBottom:12})}>{mcqs.length} MCQs · {saqs.length} SAQs</div>
+          {quiz.questions.map(function(q,i){return(
+            <div key={q.id} style={Object.assign({},S.card,{marginBottom:8})}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <span style={S.muted}>Q{i+1}</span>
+                <div style={{display:"flex",gap:6}}>
+                  <span style={S.bdg(q.type==="mcq"?"blue":"amber")}>{q.type.toUpperCase()}</span>
+                  {q.questionSubtype&&<span style={Object.assign({},S.bdg("gray"),{fontSize:11})}>{q.questionSubtype.replace("_"," ")}</span>}
+                  <span style={Object.assign({},S.bdg("green"),{fontSize:11})}>{q.marks}m</span>
+                </div>
+              </div>
+              <div style={{fontSize:14,marginBottom:q.options?8:0}}>{q.text}</div>
+              {q.options&&<div style={{fontSize:13,color:"#666"}}>{q.options.join(" · ")} <span style={{color:"#3B6D11",fontWeight:600}}>✓ {q.answer}</span></div>}
+              {q.type==="saq"&&<div style={{fontSize:13,color:"#666",marginTop:4}}>Sample: {(q.sampleAnswer||"").slice(0,120)}...</div>}
+            </div>);})}
+          {!quiz.published&&<button style={Object.assign({},S.btnP,{marginTop:8})} onClick={function(){
+            var updated=Object.assign({},quiz,{published:true});
+            setQuiz(updated);
+            api({action:"saveQuiz",quizData:JSON.stringify(updated)}).catch(function(){});
+          }}>Publish quiz</button>}
+        </div>}
+
+        {activeTab==="residents"&&<div>
+          <div style={S.card}>
+            <h3 style={S.h3}>Register residents</h3>
+            <p style={Object.assign({},S.muted,{marginBottom:12})}>Each resident gets a unique private code to log in and check results.</p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"end"}}>
+              <div><label style={S.label}>Full name</label><input style={S.inp} placeholder="Dr. Jane Smith" value={newResName} onChange={function(e){setNewResName(e.target.value);}}/></div>
+              <div><label style={S.label}>Email</label><input style={S.inp} placeholder="jane@hospital.com" value={newResEmail} onChange={function(e){setNewResEmail(e.target.value);}}/></div>
+              <button style={Object.assign({},S.btnP,{whiteSpace:"nowrap"})} onClick={addResident}>Add</button>
+            </div>
+          </div>
+          {residents.length===0&&<div style={S.muted}>No residents registered yet.</div>}
+          {residents.length>0&&<DataTable
+            ths={[{label:"#"},{label:"Name"},{label:"Email"},{label:"Resident code"},{label:"Status"},{}]}
+            rows={residents.map(function(r,i){
+              var sub=submissions.find(function(s){return s.residentCode===r.residentCode;});
+              return [{content:i+1},{content:r.name},{content:r.email},
+                {content:<code style={{fontWeight:700,fontSize:13,color:"#185FA5"}}>{r.residentCode}</code>},
+                {content:<span style={S.bdg(sub?"green":"gray")}>{sub?"Submitted":"Pending"}</span>},
+                {content:<button style={S.btnS} onClick={function(){removeResident(r.residentCode);}}>Remove</button>}];
+            })}
+          />}
+        </div>}
+
+        {activeTab==="results"&&<div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={S.muted}>{submissions.length} submission(s)</div>
+            <div style={{display:"flex",gap:8}}>
+              <button style={S.btnS} onClick={refreshSubmissions}>↻ Refresh</button>
+              {submissions.length>0&&!marking&&<button style={S.btnP} onClick={markSAQs}>Mark SAQs with AI</button>}
+            </div>
+          </div>
+          {marking&&<div style={{marginBottom:12}}>
+            <div style={S.muted}>AI marking SAQs... {markProgress}%</div>
+            <div style={S.prog}><div style={S.bar(markProgress)}/></div>
+          </div>}
+          {submissions.length===0&&<div style={S.muted}>No submissions yet. Share the quiz code <strong>{quiz.code}</strong> and take link with residents.</div>}
+          {submissions.length>0&&(function(){
+            var scored=submissions.filter(function(s){return s.totalScore!==null;});
+            var avg=scored.length?Math.round(scored.reduce(function(a,s){return a+s.totalScore;},0)/scored.length):null;
+            var avgPct=avg!==null?Math.round((avg/maxTotal)*100):null;
+            return <DataTable
+              ths={[{label:"#"},{label:"Code"},{label:"Name"},{label:"Email"},{label:"Submitted"},{label:"MCQ ("+maxMCQ+")",right:true},{label:"SAQ ("+maxSAQ+")",right:true},{label:"Total ("+maxTotal+")",right:true},{label:"%",right:true}]}
+              rows={submissions.map(function(sub,i){
+                var saqT=Object.values(sub.saqScores).reduce(function(a,b){return a+b;},0);
+                var pct=sub.totalScore!==null?Math.round((sub.totalScore/maxTotal)*100):null;
+                return [{content:i+1},{content:<code style={{fontWeight:700,fontSize:13}}>{sub.residentCode}</code>},
+                  {content:sub.name},{content:sub.email},{content:sub.submitted},{content:sub.mcqScore},
+                  {content:Object.keys(sub.saqScores).length>0?saqT:"—"},{content:sub.totalScore!==null?sub.totalScore:"—",bold:true},
+                  {content:<ScoreBadge pct={pct}/>}];
+              })}
+              foot={avg!==null?[{content:"Class average",span:7},{content:avg,bold:true},{content:<ScoreBadge pct={avgPct}/>}]:null}
+            />;
+          })()}
+        </div>}
+
+        {activeTab==="release"&&<div>
+          <div style={S.card}>
+            <h3 style={S.h3}>Shareable links</h3>
+            <p style={Object.assign({},S.muted,{marginBottom:12})}>Share these links with residents so they land directly on the right page.</p>
+            {["take","results"].map(function(type){
+              var url=getPageUrl(type);
+              var label=type==="take"?"Take the quiz":"Check my results";
+              return <div key={type} style={{marginBottom:12,padding:"12px 14px",background:"#f8f8f6",borderRadius:8,border:"1px solid #eee"}}>
+                <div style={{fontWeight:600,fontSize:13,marginBottom:4}}>{label}</div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <code style={{fontSize:12,flex:1,wordBreak:"break-all",color:"#555",background:"#eee",padding:"4px 8px",borderRadius:4}}>{url}</code>
+                  <button style={S.btnP} onClick={function(){copyToClipboard(url);}}>Copy</button>
+                </div>
+              </div>;
+            })}
+          </div>
+          <div style={S.card}>
+            <h3 style={S.h3}>Release results</h3>
+            <p style={Object.assign({},S.muted,{marginBottom:12})}>Once released, residents can view their full scores and feedback using their resident code.</p>
+            <div style={Object.assign({},S.bdg(resultsReleased?"green":"amber"),{marginBottom:16})}>{resultsReleased?"Results are live":"Results are held back"}</div>
+            {!resultsReleased&&<button style={S.btnP} onClick={function(){setResultsReleased(true);api({action:"saveReleased",released:"true"}).catch(function(){});}}>Release results to residents</button>}
+            {resultsReleased&&<div>
+              <div style={{padding:"10px 14px",background:"#f8f8f6",borderRadius:8,fontSize:13,marginBottom:16,border:"1px solid #eee"}}>
+                <strong>Email template:</strong> Your results for <em>{quiz.title}</em> are now available. Visit <strong>{getPageUrl("results")}</strong> and enter your resident code to view your score and feedback.
+              </div>
+              <div style={{borderTop:"1px solid #eee",paddingTop:16}}>
+                <div style={{fontWeight:600,fontSize:14,marginBottom:6}}>Archive this quiz</div>
+                <p style={Object.assign({},S.muted,{marginBottom:10})}>Archives this quiz and clears the active slot for a new one.</p>
+                <button style={Object.assign({},S.btnP,{background:"#3B6D11"})} onClick={archiveQuiz}>Archive quiz</button>
+              </div>
+            </div>}
+          </div>
+        </div>}
+
+        {activeTab==="archive"&&<div>
+          {archived.length===0&&<div style={S.muted}>No archived quizzes yet.</div>}
+          {archived.map(function(entry,idx){
+            var am=(entry.quiz.questions||[]).filter(function(q){return q.type==="mcq";});
+            var as2=(entry.quiz.questions||[]).filter(function(q){return q.type==="saq";});
+            return <div key={idx} style={Object.assign({},S.card,{marginBottom:8})}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div><div style={{fontWeight:500}}>{entry.quiz.title}</div><div style={S.muted}>{am.length} MCQs · {as2.length} SAQs · {entry.submissions.length} submissions · Archived {entry.archivedAt}</div></div>
+                <button style={S.btnS} onClick={function(){setViewingArchive(idx);setView("archiveDetail");}}>View</button>
+              </div>
+            </div>;
+          })}
+        </div>}
+
+        {activeTab==="settings"&&<div style={S.card}>
+          <h3 style={S.h3}>Change admin code</h3>
+          <p style={Object.assign({},S.muted,{marginBottom:16})}>Your new code will be saved to this browser's local storage.</p>
+          {changeSuccess?<div>
+            <div style={Object.assign({},S.bdg("green"),{marginBottom:12})}>Admin code updated successfully</div>
+            <button style={S.btn} onClick={function(){setChangeSuccess(false);setChangeStep(1);}}>Done</button>
+          </div>:<div>
+            {changeStep===1&&<div>
+              <label style={S.label}>Current admin code</label>
+              <input style={Object.assign({},S.inp,{marginBottom:8})} type="password" placeholder="Enter current code" value={changeOld} onChange={function(e){setChangeOld(e.target.value);}} />
+              {changeError&&<div style={S.err}>{changeError}</div>}
+              <button style={Object.assign({},S.btnP,{marginTop:8})} onClick={function(){if(changeOld!==adminPassword){setChangeError("Incorrect code.");return;}setChangeError("");setChangeStep(2);}}>Verify</button>
+            </div>}
+            {changeStep===2&&<div>
+              <label style={S.label}>New admin code</label>
+              <input style={Object.assign({},S.inp,{marginBottom:12})} type="password" placeholder="Min 6 characters" value={changeNew} onChange={function(e){setChangeNew(e.target.value);}} />
+              <label style={S.label}>Confirm new code</label>
+              <input style={Object.assign({},S.inp,{marginBottom:8})} type="password" placeholder="Re-enter new code" value={changeConfirm} onChange={function(e){setChangeConfirm(e.target.value);}} />
+              {changeError&&<div style={S.err}>{changeError}</div>}
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <button style={S.btn} onClick={function(){setChangeStep(1);setChangeError("");}}>Back</button>
+                <button style={S.btnP} onClick={function(){
+                  if(changeNew.length<6){setChangeError("Min 6 characters.");return;}
+                  if(changeNew!==changeConfirm){setChangeError("Codes don't match.");return;}
+                  localStorage.setItem(ADMIN_STORAGE_KEY,changeNew);
+                  setAdminPassword(changeNew);setChangeOld("");setChangeNew("");setChangeConfirm("");setChangeError("");setChangeStep(1);setChangeSuccess(true);
+                }}>Save new code</button>
+              </div>
+            </div>}
+          </div>}
+        </div>}
+      </div>
+    );
+  }
+
+  if(view==="archiveDetail") {
+    var entry=archived[viewingArchive];
+    if(!entry)return <div style={S.wrap}><p style={S.muted}>Not found.</p></div>;
+    var aMcqs=(entry.quiz.questions||[]).filter(function(q){return q.type==="mcq";});
+    var aSaqs=(entry.quiz.questions||[]).filter(function(q){return q.type==="saq";});
+    var aMaxMCQ=aMcqs.length*2; var aMaxSAQ=aSaqs.reduce(function(a,q){return a+q.marks;},0); var aMax=aMaxMCQ+aMaxSAQ;
+    return <div style={S.wrap}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div><h1 style={S.h1}>{entry.quiz.title}</h1><div style={S.muted}>Archived {entry.archivedAt} · Code: {entry.quiz.code}</div></div>
+        <button style={S.btnS} onClick={function(){setView("adminDashboard");setActiveTab("archive");}}>Back</button>
+      </div>
+      {entry.submissions.length===0&&<div style={S.muted}>No submissions.</div>}
+      {entry.submissions.length>0&&<DataTable
+        ths={[{label:"#"},{label:"Code"},{label:"Name"},{label:"Email"},{label:"MCQ ("+aMaxMCQ+")",right:true},{label:"SAQ ("+aMaxSAQ+")",right:true},{label:"Total ("+aMax+")",right:true},{label:"%",right:true}]}
+        rows={entry.submissions.map(function(sub,i){
+          var saqT=Object.values(sub.saqScores||{}).reduce(function(a,b){return a+b;},0);
+          var pct=sub.totalScore!==null?Math.round((sub.totalScore/aMax)*100):null;
+          return [{content:i+1},{content:<code style={{fontWeight:700,fontSize:13}}>{sub.residentCode}</code>},
+            {content:sub.name},{content:sub.email},{content:sub.mcqScore},{content:saqT||"—"},
+            {content:sub.totalScore!==null?sub.totalScore:"—",bold:true},{content:<ScoreBadge pct={pct}/>}];
+        })}
+      />}
+    </div>;
+  }
+
+  if(view==="studentEntry") return (
+    <div style={S.wrap}>
+      <div style={S.card}>
+        <h2 style={S.h2}>Start quiz</h2>
+        <div style={Object.assign({},S.bdg("blue"),{marginBottom:16})}>45 minutes · 40 MCQs · 10 SAQs</div>
+        <label style={S.label}>Quiz code</label>
+        <input style={Object.assign({},S.inp,{marginBottom:12})} placeholder="e.g. QUIZ4X7KM" value={studentQuizCode} onChange={function(e){setStudentQuizCode(e.target.value.toUpperCase());}} />
+        <label style={S.label}>Your resident code</label>
+        <input style={Object.assign({},S.inp,{marginBottom:16})} placeholder="e.g. EM4X72" value={studentResCode} onChange={function(e){setStudentResCode(e.target.value.toUpperCase());}} />
+        {entryError&&<div style={S.err}>{entryError}</div>}
+        <div style={{display:"flex",gap:8}}>
+          <button style={S.btn} onClick={function(){setView("home");}}>Back</button>
+          <button style={S.btnP} onClick={function(){
+            if(!quiz||studentQuizCode!==quiz.code){setEntryError("Invalid quiz code.");return;}
+            if(!quiz.published){setEntryError("Quiz not published yet.");return;}
+            var res=residents.find(function(r){return r.residentCode===studentResCode;});
+            if(!res){setEntryError("Resident code not found. Check with your instructor.");return;}
+            if(submissions.find(function(s){return s.residentCode===studentResCode;})){setEntryError("You have already submitted this quiz.");return;}
+            setCurrentAnswers({}); setEntryError(""); setView("quiz");
+          }}>Begin quiz</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  if(view==="quiz") {
+    var allQs=quiz.questions;
+    var answered=Object.keys(currentAnswers).filter(function(k){return currentAnswers[k];}).length;
+    return <div style={S.wrap}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0",position:"sticky",top:0,background:"#f8f8f6",zIndex:10,borderBottom:"1px solid #eee",marginBottom:8}}>
+        <div><div style={{fontWeight:600,fontSize:15}}>{quiz.title}</div><div style={S.muted}>{activeResident&&activeResident.name} · {answered}/{allQs.length} answered</div></div>
+        <Timer onExpire={submitQuiz}/>
+      </div>
+      <div style={S.prog}><div style={S.bar(Math.round((answered/allQs.length)*100))}/></div>
+      <div style={{fontWeight:600,fontSize:15,margin:"1.25rem 0 0.75rem"}}>Section A — Multiple Choice <span style={Object.assign({},S.muted,{fontWeight:400})}>(2 marks each)</span></div>
+      {mcqs.map(function(q,i){return <div key={q.id} style={Object.assign({},S.card,{marginBottom:12})}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}><span style={S.muted}>Q{i+1} of {mcqs.length}</span><span style={S.bdg("blue")}>2 marks</span></div>
+        <div style={{fontSize:15,fontWeight:500,marginBottom:12,lineHeight:1.5}}>{q.text}</div>
+        {q.options.map(function(opt){return <button key={opt} style={S.opt(currentAnswers[q.id]===opt)} onClick={function(){setCurrentAnswers(function(a){var n=Object.assign({},a);n[q.id]=opt;return n;});}}>{opt}</button>;})}
+      </div>;})}
+      <div style={{fontWeight:600,fontSize:15,margin:"1.5rem 0 0.75rem"}}>Section B — Short Answer Questions <span style={Object.assign({},S.muted,{fontWeight:400})}>(variable marks)</span></div>
+      {saqs.map(function(q,i){return <div key={q.id} style={Object.assign({},S.card,{marginBottom:12})}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}><span style={S.muted}>SAQ {i+1} of {saqs.length}</span><span style={S.bdg("amber")}>{q.marks} marks</span></div>
+        <div style={{fontSize:15,fontWeight:500,marginBottom:10,whiteSpace:"pre-line",lineHeight:1.5}}>{q.text}</div>
+        <textarea style={S.ta} placeholder="Write your structured answer here..." value={currentAnswers[q.id]||""} onChange={function(e){setCurrentAnswers(function(a){var n=Object.assign({},a);n[q.id]=e.target.value;return n;});}}/>
+      </div>;})}
+      <div style={{textAlign:"right",padding:"1rem 0 2rem"}}><button style={S.btnP} onClick={submitQuiz}>Submit quiz</button></div>
+    </div>;
+  }
+
+  if(view==="submitted") return (
+    <div style={S.wrap}>
+      <div style={Object.assign({},S.card,{textAlign:"center",padding:"3rem"})}>
+        <div style={{fontSize:48,marginBottom:16}}>✅</div>
+        <h2 style={Object.assign({},S.h2,{textAlign:"center"})}>Submitted successfully</h2>
+        <p style={Object.assign({},S.muted,{marginBottom:8})}>Thank you, <strong>{activeResident&&activeResident.name}</strong>. Your answers have been recorded.</p>
+        <p style={S.muted}>Results will be released by your instructor. Save your resident code <strong style={{color:"#185FA5"}}>{activeResident&&activeResident.residentCode}</strong> to check results later.</p>
+        <button style={Object.assign({},S.btn,{marginTop:20})} onClick={function(){setView("home");}}>Back to home</button>
+      </div>
+    </div>
+  );
+
+  if(view==="checkResults") return (
+    <div style={S.wrap}>
+      <div style={S.card}>
+        <h2 style={S.h2}>Check my results</h2>
+        <label style={S.label}>Your resident code</label>
+        <input style={Object.assign({},S.inp,{marginBottom:16})} placeholder="e.g. EM4X72" value={resCodeLookup} onChange={function(e){setResCodeLookup(e.target.value.toUpperCase());}} />
+        {lookupError&&<div style={S.err}>{lookupError}</div>}
+        <div style={{display:"flex",gap:8}}>
+          <button style={S.btn} onClick={function(){setView("home");}}>Back</button>
+          <button style={S.btnP} onClick={function(){
+            setLookupError("");
+            api({action:"getSubmissions"}).then(function(r){
+              if(!r.ok){setLookupError("Could not fetch results. Please try again.");return;}
+              var allSubs=(r.submissions||[]).map(parseSub);
+              setSubmissions(allSubs);
+              var sub=allSubs.find(function(s){return s.residentCode===resCodeLookup;});
+              if(!sub){setLookupError("No submission found for this code.");return;}
+              api({action:"getReleased"}).then(function(rel){
+                if(rel.released!=="true"){setLookupError("Results have not been released yet. Please check back later.");return;}
+                setResultsReleased(true);
+                setSubmittedId(sub.id); setView("results");
+              }).catch(function(){setLookupError("Could not check release status.");});
+            }).catch(function(){setLookupError("Network error. Please try again.");});
+          }}>View results</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  if(view==="results"&&currentSub) {
+    var saqT2=Object.values(currentSub.saqScores).reduce(function(a,b){return a+b;},0);
+    var total2=currentSub.mcqScore+saqT2;
+    var pct2=Math.round((total2/maxTotal)*100);
+    return <div style={S.wrap}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div><h1 style={S.h1}>Results</h1><div style={S.muted}>{currentSub.name} · Code: {currentSub.residentCode}</div></div>
+        <div style={{display:"flex",gap:8}}>
+          <button style={S.btnS} onClick={function(){setView("home");}}>Home</button>
+          <button style={S.btnP} onClick={downloadResultsPDF}>⬇ Download</button>
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:24}}>
+        {[["MCQ",currentSub.mcqScore+"/"+maxMCQ],["SAQ",saqT2+"/"+maxSAQ],["Total",total2+"/"+maxTotal],["Score",pct2+"%"]].map(function(item){
+          return <div key={item[0]} style={{background:"#fff",border:"1px solid #e8e6df",borderRadius:10,padding:"1rem",textAlign:"center",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}}>
+            <div style={{fontSize:12,color:"#666",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>{item[0]}</div>
+            <div style={{fontSize:22,fontWeight:700,color:"#185FA5"}}>{item[1]}</div>
+          </div>;
+        })}
+      </div>
+      <div style={{fontWeight:600,marginBottom:10,fontSize:15}}>Section A — MCQ Review</div>
+      {mcqs.map(function(q,i){
+        var ans=(currentSub.answers[q.id]||"").trim().toUpperCase().charAt(0);
+        var correct=ans===q.answer.trim().toUpperCase().charAt(0);
+        return <div key={q.id} style={Object.assign({},S.card,{marginBottom:8,borderLeft:"4px solid "+(correct?"#3B6D11":"#A32D2D")})}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={S.muted}>Q{i+1}</span>
+            <span style={{fontSize:13,color:correct?"#3B6D11":"#A32D2D",fontWeight:600}}>{correct?"+2 marks":"0 marks"}</span>
+          </div>
+          <div style={{fontSize:14,fontWeight:500,marginBottom:8,lineHeight:1.5}}>{q.text}</div>
+          <div style={{fontSize:13,marginBottom:q.explanation?8:0}}>
+            Your answer: <span style={{color:correct?"#3B6D11":"#A32D2D",fontWeight:600}}>{currentSub.answers[q.id]||"—"}</span>
+            {!correct&&<span style={{color:"#666"}}> · Correct: <span style={{color:"#3B6D11",fontWeight:600}}>{q.answer}</span></span>}
+          </div>
+          {q.explanation&&<div style={{fontSize:13,color:"#444",background:"#f8f8f6",borderRadius:6,padding:"8px 12px",lineHeight:1.5}}><strong>Explanation: </strong>{q.explanation}</div>}
+        </div>;
+      })}
+      <div style={{fontWeight:600,margin:"20px 0 10px",fontSize:15}}>Section B — SAQ Feedback</div>
+      {saqs.map(function(q,i){
+        var sc=currentSub.saqScores[q.id];
+        return <div key={q.id} style={Object.assign({},S.card,{marginBottom:10})}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={S.muted}>SAQ {i+1}</span>
+            <span style={{fontSize:13,fontWeight:600}}>{sc!==undefined?sc:"—"}/{q.marks} marks</span>
+          </div>
+          <div style={{fontSize:14,fontWeight:500,marginBottom:8,whiteSpace:"pre-line",lineHeight:1.5}}>{q.text}</div>
+          <div style={{fontSize:13,color:"#444",marginBottom:10,background:"#f8f8f6",borderRadius:6,padding:"8px 12px",lineHeight:1.5}}>
+            <strong>Your answer: </strong>{currentSub.answers[q.id]||"(no answer)"}
+          </div>
+          {currentSub.saqFeedback[q.id]&&<div style={{fontSize:13,color:"#185FA5",marginBottom:8,lineHeight:1.5}}><strong>Feedback: </strong>{currentSub.saqFeedback[q.id]}</div>}
+          {q.explanation&&<div style={{fontSize:13,color:"#444",background:"#f8f8f6",borderRadius:6,padding:"8px 12px",lineHeight:1.5}}><strong>Model answer: </strong>{q.explanation}</div>}
+        </div>;
+      })}
+    </div>;
+  }
+
+  return <div style={S.wrap}><p style={S.muted}>Loading...</p></div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
