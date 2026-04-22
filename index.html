@@ -1,6 +1,1146 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>EM Board Quiz Platform</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f8f8f6;color:#1a1a1a;min-height:100vh}
+input,textarea,button,select{font-family:inherit}
+input:focus,textarea:focus{outline:none;border-color:#185FA5!important;box-shadow:0 0 0 2px rgba(24,95,165,0.15)}
+button:focus{outline:none}
+button:active{transform:scale(0.98)}
+code{font-family:monospace}
+#root{min-height:100vh}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="root"><div style="text-align:center;padding:5rem 1rem;font-family:sans-serif;color:#666">
+  <div style="font-size:32px;margin-bottom:12px">⚕</div>
+  <div style="font-size:16px;font-weight:500;margin-bottom:8px">EM Board Quiz Platform</div>
+  <div style="font-size:14px">Loading...</div>
+</div></div>
+<script>
+// ── Minimal React-like implementation ──────────────────────────
+// We use vanilla JS with a simple state management approach
+// to avoid all external dependencies
+
+var BACKEND = "https://script.google.com/macros/s/AKfycbyQSvBTtEVLuCXIGBO314DWXYKXkk3X8wOe8Hf4xBugxsBP5vjLUrMBsIV0mfXchmix/exec";
+var ADMIN_KEY = "em_quiz_admin_code";
+var QUIZ_DURATION = 45 * 60;
+
+// ── Utilities ──────────────────────────────────────────────────
+function api(body) {
+  return fetch(BACKEND + "?action=" + body.action, {
+    method: "POST", headers: {"Content-Type": "text/plain"},
+    body: JSON.stringify(body)
+  }).then(function(r){return r.json();});
+}
+
+function genCode() {
+  return "EM" + Math.random().toString(36).substring(2,5).toUpperCase() + Math.floor(10+Math.random()*90);
+}
+
+function callClaude(messages, sys) {
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({model:"claude-sonnet-4-20250514", max_tokens:8000, system:sys, messages:messages})
+  }).then(function(r){return r.json();});
+}
+
+function parseArr(data) {
+  var raw = (data.content||[]).map(function(b){return b.text||"";}).join("");
+  var match = raw.match(/\[[\s\S]*/);
+  if(!match) throw new Error("No JSON array");
+  var str = match[0];
+  var lb = str.lastIndexOf("}");
+  if(lb!==-1) str = str.slice(0,lb+1)+"]";
+  str = str.replace(/,\s*([}\]])/g,"$1");
+  try{return JSON.parse(str);}
+  catch(e){
+    var objs=[],re=/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g,m;
+    while((m=re.exec(str))!==null){try{objs.push(JSON.parse(m[0]));}catch(e2){}}
+    if(objs.length)return objs;
+    throw new Error("Parse failed");
+  }
+}
+
+function parseSub(s) {
+  return Object.assign({},s,{
+    answers: typeof s.answers==="string"?tryParse(s.answers,{}):s.answers,
+    saqScores: typeof s.saqScores==="string"?tryParse(s.saqScores,{}):s.saqScores,
+    saqFeedback: typeof s.saqFeedback==="string"?tryParse(s.saqFeedback,{}):s.saqFeedback,
+  });
+}
+
+function tryParse(str, def) {
+  try{return JSON.parse(str||"");}catch(e){return def;}
+}
+
+function fmtTime(s) {
+  return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");
+}
+
+function el(tag, props, children) {
+  var e = document.createElement(tag);
+  if(props) {
+    Object.keys(props).forEach(function(k) {
+      if(k==="style" && typeof props[k]==="object") {
+        Object.assign(e.style, props[k]);
+      } else if(k.startsWith("on") && typeof props[k]==="function") {
+        e.addEventListener(k.slice(2).toLowerCase(), props[k]);
+      } else if(k==="className") {
+        e.className = props[k];
+      } else if(k==="htmlFor") {
+        e.htmlFor = props[k];
+      } else if(k in e) {
+        e[k] = props[k];
+      } else {
+        e.setAttribute(k, props[k]);
+      }
+    });
+  }
+  if(children) {
+    (Array.isArray(children)?children:[children]).forEach(function(c){
+      if(c==null||c===false) return;
+      e.appendChild(typeof c==="string"||typeof c==="number" ? document.createTextNode(String(c)) : c);
+    });
+  }
+  return e;
+}
+
+function div(props,children){return el("div",props,children);}
+function span(props,children){return el("span",props,children);}
+function p(props,children){return el("p",props,children);}
+function h1(props,children){return el("h1",props,children);}
+function h2(props,children){return el("h2",props,children);}
+function h3(props,children){return el("h3",props,children);}
+function btn(props,children){return el("button",props,children);}
+function inp(props){return el("input",props);}
+function ta(props){return el("textarea",props);}
+function code(props,children){return el("code",props,children);}
+
+// ── Styles ─────────────────────────────────────────────────────
+var C = {
+  wrap: {maxWidth:"820px",margin:"0 auto",padding:"2rem 1rem"},
+  card: {background:"#fff",border:"1px solid #e8e6df",borderRadius:"12px",padding:"1.5rem",marginBottom:"1rem",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"},
+  inp: {width:"100%",padding:"9px 12px",borderRadius:"8px",border:"1px solid #ddd",fontSize:"14px",background:"#fff",color:"#1a1a1a",transition:"border 0.2s",display:"block"},
+  ta: {width:"100%",padding:"9px 12px",borderRadius:"8px",border:"1px solid #ddd",fontSize:"14px",minHeight:"90px",resize:"vertical",background:"#fff",color:"#1a1a1a",display:"block"},
+  btn: {padding:"9px 20px",borderRadius:"8px",border:"1px solid #ddd",background:"#fff",cursor:"pointer",fontSize:"14px",color:"#1a1a1a",fontWeight:"500"},
+  btnP: {padding:"9px 20px",borderRadius:"8px",border:"none",background:"#185FA5",color:"#fff",cursor:"pointer",fontSize:"14px",fontWeight:"600"},
+  btnS: {padding:"5px 12px",borderRadius:"6px",border:"1px solid #ddd",background:"#fff",cursor:"pointer",fontSize:"13px",color:"#444"},
+  label: {fontSize:"13px",color:"#666",display:"block",marginBottom:"4px"},
+  muted: {fontSize:"13px",color:"#666"},
+  err: {color:"#A32D2D",fontSize:"13px",marginBottom:"8px",padding:"8px 12px",background:"#FCEBEB",borderRadius:"6px"},
+  prog: {height:"6px",borderRadius:"4px",background:"#eee",overflow:"hidden",margin:"0.5rem 0 1rem"},
+  th: {padding:"10px 12px",fontSize:"13px",fontWeight:"600",textAlign:"left",borderBottom:"1px solid #eee",color:"#666",whiteSpace:"nowrap",background:"#f8f8f6"},
+  td: {padding:"10px 12px",fontSize:"13px",borderBottom:"1px solid #f0f0ee",verticalAlign:"middle"},
+};
+
+function bdg(c) {
+  var bg={blue:"#E6F1FB",green:"#EAF3DE",amber:"#FAEEDA",red:"#FCEBEB",gray:"#F1EFE8"};
+  var fg={blue:"#185FA5",green:"#3B6D11",amber:"#854F0B",red:"#A32D2D",gray:"#5F5E5A"};
+  return {display:"inline-block",padding:"3px 10px",borderRadius:"20px",fontSize:"12px",fontWeight:"600",background:bg[c]||bg.gray,color:fg[c]||fg.gray};
+}
+
+function optStyle(sel) {
+  return {display:"block",width:"100%",textAlign:"left",padding:"10px 14px",borderRadius:"8px",
+    border:"1.5px solid "+(sel?"#185FA5":"#ddd"),background:sel?"#EBF3FB":"#fff",
+    cursor:"pointer",fontSize:"14px",color:sel?"#185FA5":"#1a1a1a",marginBottom:"6px",
+    fontWeight:sel?"500":"400"};
+}
+
+// ── App State ──────────────────────────────────────────────────
+var state = {
+  view: (function(){
+    var s=window.location.search||"";
+    if(s.indexOf("page=take")!==-1)return "studentEntry";
+    if(s.indexOf("page=results")!==-1)return "checkResults";
+    return "home";
+  })(),
+  loading: true,
+  adminPassword: localStorage.getItem(ADMIN_KEY)||null,
+  setupStep:1, setupCode:"", setupConfirm:"", setupError:"",
+  changeStep:1, changeOld:"", changeNew:"", changeConfirm:"", changeError:"", changeSuccess:false,
+  quiz: null,
+  archived: [],
+  viewingArchive: null,
+  generating: false, genProgress:0, genStatus:"",
+  pdfText:"", quizTitle:"",
+  residents: [],
+  newResName:"", newResEmail:"",
+  submissions:[],
+  currentAnswers:{},
+  submittedId:null,
+  resultsReleased:false,
+  studentResCode:"", studentQuizCode:"",
+  entryError:"",
+  adminCode:"", adminError:"",
+  activeTab:"questions",
+  marking:false, markProgress:0,
+  resCodeLookup:"", lookupError:"",
+  timerLeft: QUIZ_DURATION,
+  timerInterval: null,
+};
+
+// ── Render engine ──────────────────────────────────────────────
+function setState(updates) {
+  Object.assign(state, updates);
+  render();
+}
+
+function render() {
+  var root = document.getElementById("root");
+  var newContent = renderApp();
+  if(newContent) {
+    root.innerHTML = "";
+    root.appendChild(newContent);
+  }
+}
+
+// ── Timer ──────────────────────────────────────────────────────
+function startTimer() {
+  if(state.timerInterval) clearInterval(state.timerInterval);
+  state.timerLeft = QUIZ_DURATION;
+  state.timerInterval = setInterval(function(){
+    state.timerLeft--;
+    if(state.timerLeft <= 0) {
+      clearInterval(state.timerInterval);
+      submitQuiz();
+      return;
+    }
+    var timerEl = document.getElementById("quiz-timer");
+    var timerBar = document.getElementById("quiz-timer-bar");
+    if(timerEl) {
+      var c = state.timerLeft<300?"#A32D2D":state.timerLeft<600?"#854F0B":"#185FA5";
+      timerEl.textContent = fmtTime(state.timerLeft);
+      timerEl.style.color = c;
+      if(timerBar) timerBar.style.width = Math.round((state.timerLeft/QUIZ_DURATION)*100)+"%";
+    }
+  }, 1000);
+}
+
+// ── Data helpers ───────────────────────────────────────────────
+function getMcqs(){return state.quiz&&state.quiz.questions?state.quiz.questions.filter(function(q){return q.type==="mcq";}):[]; }
+function getSaqs(){return state.quiz&&state.quiz.questions?state.quiz.questions.filter(function(q){return q.type==="saq";}):[]; }
+function getMaxMCQ(){return getMcqs().length*2;}
+function getMaxSAQ(){return getSaqs().reduce(function(a,q){return a+q.marks;},0);}
+function getMaxTotal(){return getMaxMCQ()+getMaxSAQ();}
+function getCurrentSub(){return state.submissions.find(function(s){return s.id===state.submittedId;});}
+function getActiveResident(){return state.residents.find(function(r){return r.residentCode===state.studentResCode;});}
+
+function refreshSubmissions() {
+  return api({action:"getSubmissions"}).then(function(r){
+    if(r.ok&&r.submissions) setState({submissions:r.submissions.map(parseSub)});
+  }).catch(function(){});
+}
+
+// ── Load data ──────────────────────────────────────────────────
+function loadAll() {
+  Promise.all([
+    api({action:"getQuiz"}).then(function(r){if(r.ok&&r.quizData)state.quiz=JSON.parse(r.quizData);}).catch(function(){}),
+    api({action:"getResidents"}).then(function(r){if(r.ok&&r.residents)state.residents=JSON.parse(r.residents);}).catch(function(){}),
+    api({action:"getSubmissions"}).then(function(r){if(r.ok&&r.submissions)state.submissions=r.submissions.map(parseSub);}).catch(function(){}),
+    api({action:"getReleased"}).then(function(r){if(r.ok)state.resultsReleased=r.released==="true";}).catch(function(){}),
+    api({action:"getArchived"}).then(function(r){if(r.ok&&r.archived)state.archived=tryParse(r.archived,[]);}).catch(function(){}),
+  ]).finally(function(){setState({loading:false});});
+}
+
+// ── Quiz generation ────────────────────────────────────────────
+function generateQuiz() {
+  if(!state.pdfText)return;
+  setState({generating:true,genProgress:5});
+  var base="You are a senior Emergency Medicine board examiner creating questions at ABEM/FCEM level for EM residents.\nRULES: 80% from chapter text (facts, tables, algorithms, figures). 20% from recent landmark trials/ACEP guidelines.\nVignettes must include chief complaint, vitals, key exam/investigation findings. Distractors must be plausible.\nquestionSubtype: vignette | factual | table_algorithm | graphic";
+  var mcqSys=base+"\nEach MCQ=2 marks. Return ONLY a valid JSON array of exactly 10 MCQ objects, no markdown:\n[{\"id\":\"q1\",\"type\":\"mcq\",\"questionSubtype\":\"vignette\",\"text\":\"...\",\"options\":[\"A. ...\",\"B. ...\",\"C. ...\",\"D. ...\"],\"answer\":\"A\",\"explanation\":\"Full explanation.\"}]\nGenerate EXACTLY 10 MCQs.";
+  var saqSys=base+"\nEach SAQ: max 2 subsections (a)(b), total marks 4-6, brief answers. Return ONLY a valid JSON array of exactly 5 SAQ objects:\n[{\"id\":\"s1\",\"type\":\"saq\",\"questionSubtype\":\"algorithm\",\"text\":\"Question with (a)(b)\",\"totalMarks\":5,\"sampleAnswer\":\"(a)...[3m]\\n(b)...[2m]\",\"markingCriteria\":\"(a) 1 mark each for: x,y,z\",\"explanation\":\"Concise explanation.\"}]\nGenerate EXACTLY 5 SAQs.";
+  var mcqBatches=[
+    {label:"MCQs 1-10",prompt:"Generate MCQs 1-10: ALL 10 must be clinical vignette type with full patient presentation, vitals, exam findings."},
+    {label:"MCQs 11-20",prompt:"Generate MCQs 11-20: ALL 10 must be factual testing thresholds, criteria, classifications, drug doses from the chapter."},
+    {label:"MCQs 21-30",prompt:"Generate MCQs 21-30: ALL 10 based on tables, scoring systems, diagnostic criteria, algorithms from the chapter."},
+    {label:"MCQs 31-40",prompt:"Generate MCQs 31-40: 4 graphic/image-based (ECG, X-ray, lab pattern) and 6 additional clinical vignettes."},
+  ];
+  var saqBatches=[
+    {label:"SAQs 1-5",prompt:"Generate exactly 5 concise board-level EM SAQs. Each: exactly 2 subsections (a)(b), total marks 4-6. Focus on management and clinical decisions."},
+    {label:"SAQs 6-10",prompt:"Generate exactly 5 concise board-level EM SAQs. Each: exactly 2 subsections (a)(b), total marks 4-6. Focus on investigations, differentials, evidence-based treatment. Different topics from SAQs 1-5."},
+  ];
+  var allMCQs=[],allSAQs=[],totalSteps=mcqBatches.length+saqBatches.length;
+  function runBatches(batches,sys,collector,offset){
+    var chain=Promise.resolve();
+    batches.forEach(function(batch,i){
+      chain=chain.then(function(){
+        var step=offset+i+1;
+        setState({genStatus:"Generating "+batch.label+" ("+step+"/"+totalSteps+")...",genProgress:Math.round((step/(totalSteps+1))*90)});
+        return callClaude([{role:"user",content:batch.prompt+"\n\nCHAPTER:\n"+state.pdfText}],sys)
+          .then(function(data){if(data.error)throw new Error(data.error.message);parseArr(data).forEach(function(q){collector.push(q);});});
+      });
+    });
+    return chain;
+  }
+  runBatches(mcqBatches,mcqSys,allMCQs,0)
+    .then(function(){return runBatches(saqBatches,saqSys,allSAQs,mcqBatches.length);})
+    .then(function(){
+      var questions=allMCQs.slice(0,40).map(function(q,i){return Object.assign({},q,{id:"q"+(i+1),type:"mcq",marks:2});})
+        .concat(allSAQs.slice(0,10).map(function(q,i){return Object.assign({},q,{id:"s"+(i+1),type:"saq",marks:q.totalMarks||5});}));
+      if(!questions.length)throw new Error("No questions generated.");
+      var code="QUIZ"+Math.random().toString(36).substring(2,7).toUpperCase();
+      var newQuiz={title:state.quizTitle||"Medical Quiz",questions:questions,code:code,published:false};
+      api({action:"saveQuiz",quizData:JSON.stringify(newQuiz)}).catch(function(){});
+      setState({quiz:newQuiz,genProgress:100,genStatus:"Done! "+questions.filter(function(q){return q.type==="mcq";}).length+" MCQs + "+questions.filter(function(q){return q.type==="saq";}).length+" SAQs generated.",generating:false,view:"adminDashboard"});
+    })
+    .catch(function(err){setState({genStatus:"Error: "+(err.message||String(err)),generating:false});});
+}
+
+function submitQuiz() {
+  if(state.timerInterval)clearInterval(state.timerInterval);
+  var mcqs=getMcqs(),mcqScore=0;
+  mcqs.forEach(function(q){
+    var ans=(state.currentAnswers[q.id]||"").trim().toUpperCase().charAt(0);
+    var correct=(q.answer||"").trim().toUpperCase().charAt(0);
+    if(ans&&ans===correct)mcqScore+=2;
+  });
+  var sid="S"+Date.now();
+  var res=getActiveResident();
+  var sub={id:sid,residentCode:res.residentCode,name:res.name,email:res.email,answers:state.currentAnswers,submitted:new Date().toLocaleString(),mcqScore:mcqScore,saqScores:{},saqFeedback:{},totalScore:null,maxScore:null};
+  var newSubs=state.submissions.concat([sub]);
+  api({action:"submitAnswers",id:sid,residentCode:res.residentCode,name:res.name,email:res.email,submitted:sub.submitted,answers:JSON.stringify(state.currentAnswers),mcqScore:mcqScore}).catch(function(){});
+  setState({submissions:newSubs,submittedId:sid,view:"submitted"});
+}
+
+function markSAQs() {
+  var saqs=getSaqs();
+  if(!state.submissions.length)return;
+  var maxTotal=getMaxTotal();
+  setState({marking:true,markProgress:0});
+  var updated=state.submissions.slice();
+  var chain=Promise.resolve();
+  updated.forEach(function(sub,si){
+    chain=chain.then(function(){
+      setState({markProgress:Math.round((si/updated.length)*90)});
+      var saqList=saqs.map(function(q,i){return "SAQ "+(i+1)+" [id:"+q.id+"] [totalMarks:"+q.marks+"]\nQ: "+q.text+"\nSample: "+q.sampleAnswer+"\nCriteria: "+q.markingCriteria+"\nStudent: "+(sub.answers[q.id]||"(no answer)");}).join("\n\n---\n\n");
+      var sys="Senior EM board examiner. Mark each SAQ out of its totalMarks. Return ONLY JSON array:\n[{\"id\":\"q_id\",\"score\":0,\"feedback\":\"constructive feedback\"}]";
+      return callClaude([{role:"user",content:"Mark "+saqs.length+" SAQs:\n\n"+saqList}],sys)
+        .then(function(data){
+          if(data.error)throw new Error(data.error.message);
+          var results=parseArr(data);
+          results.forEach(function(r){sub.saqScores[r.id]=typeof r.score==="number"?r.score:0;sub.saqFeedback[r.id]=r.feedback||"";});
+          saqs.forEach(function(q){if(sub.saqScores[q.id]===undefined){sub.saqScores[q.id]=0;sub.saqFeedback[q.id]="Not marked.";}});
+        })
+        .catch(function(err){saqs.forEach(function(q){sub.saqScores[q.id]=0;sub.saqFeedback[q.id]="Error: "+err.message;});})
+        .finally(function(){
+          var saqTotal=Object.values(sub.saqScores).reduce(function(a,b){return a+b;},0);
+          sub.totalScore=sub.mcqScore+saqTotal; sub.maxScore=maxTotal;
+          updated[si]=sub;
+          api({action:"updateMarking",id:sub.id,saqScores:JSON.stringify(sub.saqScores),saqFeedback:JSON.stringify(sub.saqFeedback),totalScore:sub.totalScore,maxScore:sub.maxScore}).catch(function(){});
+          setState({submissions:updated.slice()});
+        });
+    });
+  });
+  chain.finally(function(){setState({markProgress:100,marking:false});});
+}
+
+function archiveQuiz() {
+  var newArchived=state.archived.concat([{quiz:Object.assign({},state.quiz),submissions:state.submissions.slice(),residents:state.residents.slice(),archivedAt:new Date().toLocaleString()}]);
+  api({action:"saveArchived",archived:JSON.stringify(newArchived)}).catch(function(){});
+  api({action:"deleteQuiz"}).catch(function(){});
+  api({action:"clearSubmissions"}).catch(function(){});
+  api({action:"saveResidents",residents:"[]"}).catch(function(){});
+  api({action:"saveReleased",released:"false"}).catch(function(){});
+  setState({archived:newArchived,quiz:null,submissions:[],resultsReleased:false,residents:[],activeTab:"questions",view:"adminDashboard"});
+}
+
+function getPageUrl(page){return window.location.origin+window.location.pathname+"?page="+page;}
+
+function copyText(text){
+  var el=document.createElement("textarea");el.value=text;document.body.appendChild(el);el.select();document.execCommand("copy");document.body.removeChild(el);
+}
+
+function makeTable(ths,rows,foot){
+  var wrap=div({style:{overflowX:"auto",borderRadius:"10px",border:"1px solid #e8e6df",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}});
+  var tbl=el("table",{style:{width:"100%",borderCollapse:"collapse",background:"#fff"}});
+  var thead=el("thead"); var tr=el("tr");
+  ths.forEach(function(h){tr.appendChild(el("th",{style:Object.assign({},C.th,h.right?{textAlign:"right"}:{})},h.label));});
+  thead.appendChild(tr); tbl.appendChild(thead);
+  var tbody=el("tbody");
+  rows.forEach(function(row,i){
+    var tr=el("tr",{style:{background:i%2===0?"#fff":"#fafaf8"}});
+    row.forEach(function(cell,j){
+      var td=el("td",{style:Object.assign({},C.td,ths[j]&&ths[j].right?{textAlign:"right"}:{},cell.bold?{fontWeight:"600"}:{})});
+      if(typeof cell.content==="string"||typeof cell.content==="number") td.textContent=cell.content;
+      else if(cell.content) td.appendChild(cell.content);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+  if(foot){
+    var tfoot=el("tfoot"); var tr=el("tr",{style:{background:"#f0f0ee"}});
+    foot.forEach(function(cell,i){
+      var td=el("td",{colSpan:cell.span||1,style:Object.assign({},C.td,{fontWeight:"600"},ths[i]&&ths[i].right?{textAlign:"right"}:{})});
+      if(typeof cell.content==="string"||typeof cell.content==="number") td.textContent=cell.content;
+      else if(cell.content) td.appendChild(cell.content);
+      tr.appendChild(td);
+    });
+    tfoot.appendChild(tr); tbl.appendChild(tfoot);
+  }
+  wrap.appendChild(tbl); return wrap;
+}
+
+function scoreBadge(pct){
+  if(pct===null||pct===undefined)return span({style:{color:"#999"}},"—");
+  return span({style:bdg(pct>=70?"green":pct>=50?"amber":"red")},pct+"%");
+}
+
+function codeBadge(text){return code({style:{fontWeight:"700",fontSize:"13px",color:"#185FA5"}},text);}
+
+// ── PDF Upload ─────────────────────────────────────────────────
+function handlePdfUpload(file) {
+  if(!file)return;
+  setState({genStatus:"Loading PDF...",generating:true,genProgress:5});
+  var loadScript=new Promise(function(res,rej){
+    if(window.pdfjsLib){res();return;}
+    var sc=document.createElement("script");
+    sc.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    sc.onload=res; sc.onerror=rej; document.head.appendChild(sc);
+  });
+  loadScript.then(function(){
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    return file.arrayBuffer();
+  }).then(function(ab){return window.pdfjsLib.getDocument({data:ab}).promise;})
+  .then(function(pdf){
+    var pc=Math.min(pdf.numPages,60);var i=1;
+    function nextPage(text){
+      if(i>pc)return Promise.resolve(text);
+      var idx=i++;
+      return pdf.getPage(idx).then(function(pg){return pg.getTextContent();}).then(function(tc){
+        var t=text+tc.items.map(function(x){return x.str;}).join(" ")+"\n";
+        setState({genProgress:5+Math.round((idx/pc)*20)});
+        return nextPage(t);
+      });
+    }
+    return nextPage("");
+  }).then(function(text){
+    var title=state.quizTitle||file.name.replace(".pdf","");
+    setState({pdfText:text.slice(0,30000),quizTitle:title,genStatus:"PDF loaded — "+Math.round(text.length/1000)+"k characters",generating:false});
+  }).catch(function(err){setState({genStatus:"Failed: "+err.message,generating:false});});
+}
+
+// ── Download results PNG ────────────────────────────────────────
+function downloadResults() {
+  var currentSub=getCurrentSub();
+  if(!currentSub)return;
+  var saqs=getSaqs(),mcqs=getMcqs(),maxMCQ=getMaxMCQ(),maxSAQ=getMaxSAQ(),maxTotal=getMaxTotal();
+  var saqT=Object.values(currentSub.saqScores).reduce(function(a,b){return a+b;},0);
+  var total=currentSub.mcqScore+saqT,pct=Math.round((total/maxTotal)*100);
+  var lines=[];
+  function line(t,sz,bold,col){lines.push({t:t||"",sz:sz||11,bold:!!bold,col:col||"#1a1a1a"});}
+  function blank(){lines.push(null);}
+  line(state.quiz.title,18,true); line("Results Report",13,false,"#555"); blank();
+  line("Resident: "+currentSub.name+"   Code: "+currentSub.residentCode,11);
+  line("Email: "+currentSub.email+"   Submitted: "+currentSub.submitted,11); blank();
+  line("SCORE SUMMARY",12,true);
+  line("MCQ: "+currentSub.mcqScore+"/"+maxMCQ+"   SAQ: "+saqT+"/"+maxSAQ+"   Total: "+total+"/"+maxTotal+" ("+pct+"%)",12,true,pct>=70?"#3B6D11":pct>=50?"#854F0B":"#A32D2D");
+  blank(); line("─────────────────────────────────────────",9,false,"#ccc");
+  line("SECTION A — MCQ REVIEW",12,true); blank();
+  mcqs.forEach(function(q,i){
+    var ans=(currentSub.answers[q.id]||"").trim().toUpperCase().charAt(0);
+    var correct=ans===q.answer.trim().toUpperCase().charAt(0);
+    line("Q"+(i+1)+". "+q.text,10,true);
+    line((correct?"✓ Correct":"✗ Incorrect")+" Your answer: "+(currentSub.answers[q.id]||"—")+(correct?"":"  Correct: "+q.answer),10,false,correct?"#3B6D11":"#A32D2D");
+    if(q.explanation)line("Explanation: "+q.explanation,9,false,"#444");
+    blank();
+  });
+  line("─────────────────────────────────────────",9,false,"#ccc");
+  line("SECTION B — SAQ FEEDBACK",12,true); blank();
+  saqs.forEach(function(q,i){
+    var sc=currentSub.saqScores[q.id];
+    line("SAQ "+(i+1)+". "+q.text,10,true);
+    line("Score: "+(sc!==undefined?sc:"—")+"/"+q.marks+" marks",10,false,"#185FA5");
+    line("Answer: "+(currentSub.answers[q.id]||"(none)"),9,false,"#444");
+    if(currentSub.saqFeedback[q.id])line("Feedback: "+currentSub.saqFeedback[q.id],9,false,"#185FA5");
+    if(q.explanation)line("Model answer: "+q.explanation,9,false,"#444");
+    blank();
+  });
+  var canvas=document.createElement("canvas"),margin=50,pw=794,maxW=pw-margin*2;
+  canvas.width=pw;
+  var ctx=canvas.getContext("2d");
+  function wrap(text,size){
+    var words=text.split(" "),wrapped=[],cur="";
+    ctx.font=size+"px Arial";
+    words.forEach(function(w){var t=cur?cur+" "+w:w;if(ctx.measureText(t).width>maxW){if(cur)wrapped.push(cur);cur=w;}else cur=t;});
+    if(cur)wrapped.push(cur); return wrapped;
+  }
+  var h=margin;
+  lines.forEach(function(l){if(!l){h+=8;return;}h+=wrap(l.t,l.sz).length*(l.sz*1.5);});
+  h+=margin; canvas.height=h;
+  ctx.fillStyle="#fff"; ctx.fillRect(0,0,pw,h);
+  ctx.fillStyle="#185FA5"; ctx.fillRect(0,0,pw,6);
+  var y=margin+6;
+  lines.forEach(function(l){
+    if(!l){y+=8;return;}
+    ctx.font=(l.bold?"bold ":"")+l.sz+"px Arial"; ctx.fillStyle=l.col;
+    wrap(l.t,l.sz).forEach(function(row){ctx.fillText(row,margin,y);y+=l.sz*1.5;});
+  });
+  ctx.fillStyle="#185FA5"; ctx.fillRect(0,h-4,pw,4);
+  ctx.font="9px Arial"; ctx.fillStyle="#888";
+  ctx.fillText("EM Board Quiz Platform  "+new Date().toLocaleDateString(),margin,h-10);
+  canvas.toBlob(function(blob){
+    var url=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=url; a.download=(currentSub.name+"_"+state.quiz.title+"_results").replace(/\s+/g,"_")+".png";
+    a.click(); URL.revokeObjectURL(url);
+  },"image/png");
+}
+
+// ── RENDER VIEWS ───────────────────────────────────────────────
+function renderApp() {
+  var v=state.view;
+
+  if(state.loading) return div({style:{textAlign:"center",paddingTop:"5rem",color:"#666"}},[
+    div({style:{fontSize:"32px",marginBottom:"12px"}},"⚕"),
+    div({style:{fontSize:"16px",fontWeight:"500",marginBottom:"8px"}},"EM Board Quiz Platform"),
+    div({style:{fontSize:"14px"}},"Loading data...")
+  ]);
+
+  // Setup wizard
+  if(!state.adminPassword && v==="adminLogin") return renderSetup();
+  if(v==="home") return renderHome();
+  if(v==="adminLogin") return renderAdminLogin();
+  if(v==="upload") return renderUpload();
+  if(v==="adminDashboard") return renderAdminDashboard();
+  if(v==="archiveDetail") return renderArchiveDetail();
+  if(v==="studentEntry") return renderStudentEntry();
+  if(v==="quiz") return renderQuiz();
+  if(v==="submitted") return renderSubmitted();
+  if(v==="checkResults") return renderCheckResults();
+  if(v==="results") return renderResults();
+  return div({},"Loading...");
+}
+
+function renderSetup() {
+  var d=div({style:C.wrap},[
+    div({style:C.card},[
+      span({style:Object.assign({},bdg("blue"),{marginBottom:"16px",display:"inline-block"})},"First-time setup"),
+      h2({style:{fontSize:"18px",fontWeight:"600",margin:"12px 0 8px"}},"Create your admin code"),
+      p({style:Object.assign({},C.muted,{marginBottom:"16px"})},"Choose a secure code (min 6 characters). Saved to this browser."),
+    ])
+  ]);
+  var card=d.querySelector("div > div");
+  if(state.setupStep===1) {
+    var input=inp({style:Object.assign({},C.inp,{marginBottom:"8px"}),type:"password",placeholder:"Min 6 characters",value:state.setupCode});
+    input.addEventListener("input",function(){state.setupCode=input.value;});
+    card.appendChild(input);
+    if(state.setupError) card.appendChild(div({style:C.err},state.setupError));
+    card.appendChild(div({style:{display:"flex",gap:"8px",marginTop:"8px"}},[
+      btn({style:C.btn,onclick:function(){setState({view:"home"});}}, "Back"),
+      btn({style:C.btnP,onclick:function(){
+        if(state.setupCode.length<6){setState({setupError:"Min 6 characters."});return;}
+        setState({setupError:"",setupStep:2});
+      }},"Continue"),
+    ]));
+  } else {
+    var input=inp({style:Object.assign({},C.inp,{marginBottom:"8px"}),type:"password",placeholder:"Re-enter your code",value:state.setupConfirm});
+    input.addEventListener("input",function(){state.setupConfirm=input.value;});
+    card.appendChild(input);
+    if(state.setupError) card.appendChild(div({style:C.err},state.setupError));
+    card.appendChild(div({style:{display:"flex",gap:"8px",marginTop:"8px"}},[
+      btn({style:C.btn,onclick:function(){setState({setupStep:1});}}, "Back"),
+      btn({style:C.btnP,onclick:function(){
+        if(state.setupConfirm!==state.setupCode){setState({setupError:"Codes don't match."});return;}
+        localStorage.setItem(ADMIN_KEY,state.setupCode);
+        setState({adminPassword:state.setupCode,setupCode:"",setupConfirm:"",setupError:"",setupStep:1,view:state.quiz?"adminDashboard":"upload"});
+      }},"Set admin code"),
+    ]));
+  }
+  return d;
+}
+
+function renderHome() {
+  return div({style:C.wrap},[
+    div({style:{textAlign:"center",padding:"3rem 0 2rem"}},[
+      div({style:{fontSize:"40px",marginBottom:"12px"}},"⚕"),
+      h1({style:{fontSize:"28px",fontWeight:"700",marginBottom:"8px"}},"EM Board Quiz Platform"),
+      p({style:{fontSize:"15px",color:"#666",maxWidth:"420px",margin:"0 auto 2.5rem"}},"AI-powered board-level quizzes for Emergency Medicine residents."),
+    ]),
+    div({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"16px",maxWidth:"540px",margin:"0 auto"}},[
+      (function(){var c=div({style:Object.assign({},C.card,{cursor:"pointer",textAlign:"center",padding:"2rem"})},[
+        div({style:{fontSize:"28px",marginBottom:"12px"}},"🎓"),
+        div({style:{fontWeight:"600",fontSize:"16px",marginBottom:"6px"}},"Educator"),
+        div({style:{fontSize:"13px",color:"#666"}},"Create and manage quizzes"),
+      ]);c.addEventListener("click",function(){setState({view:"adminLogin"});});return c;})(),
+      (function(){var c=div({style:Object.assign({},C.card,{cursor:"pointer",textAlign:"center",padding:"2rem"})},[
+        div({style:{fontSize:"28px",marginBottom:"12px"}},"📝"),
+        div({style:{fontWeight:"600",fontSize:"16px",marginBottom:"6px"}},"Resident"),
+        div({style:{fontSize:"13px",color:"#666"}},"Take a 45-minute quiz"),
+      ]);c.addEventListener("click",function(){setState({view:"studentEntry"});});return c;})(),
+    ]),
+    div({style:{textAlign:"center",marginTop:"20px"}},
+      (function(){var b=btn({style:C.btnS},"Check my results");b.addEventListener("click",function(){setState({view:"checkResults"});});return b;})()
+    ),
+  ]);
+}
+
+function renderAdminLogin() {
+  var errEl=state.adminError?div({style:C.err},state.adminError):null;
+  var input=inp({style:Object.assign({},C.inp,{marginBottom:"8px"}),type:"password",placeholder:"Enter admin code",value:state.adminCode});
+  input.addEventListener("input",function(){state.adminCode=input.value;});
+  input.addEventListener("keydown",function(e){if(e.key==="Enter")tryLogin();});
+  function tryLogin(){
+    if(state.adminCode===state.adminPassword){setState({view:state.quiz?"adminDashboard":"upload",adminError:""});}
+    else setState({adminError:"Incorrect code."});
+  }
+  var children=[h2({style:{fontSize:"18px",fontWeight:"600",marginBottom:"1rem"}},"Admin access"),el("label",{style:C.label},"Admin code"),input];
+  if(errEl)children.push(errEl);
+  children.push(div({style:{display:"flex",gap:"8px",marginTop:"8px"}},[
+    (function(){var b=btn({style:C.btn},"Back");b.addEventListener("click",function(){setState({view:"home"});});return b;})(),
+    (function(){var b=btn({style:C.btnP},"Continue");b.addEventListener("click",tryLogin);return b;})(),
+  ]));
+  return div({style:C.wrap},div({style:C.card},children));
+}
+
+function renderUpload() {
+  var statusEl=div({style:Object.assign({},C.muted,{marginBottom:"4px"})},state.genStatus);
+  var progEl=state.generating?div({style:C.prog},div({style:Object.assign({},C.bar(state.genProgress),{transition:"width 0.4s"})})):null;
+  var loadedBadge=state.pdfText&&!state.generating?span({style:Object.assign({},bdg("green"),{marginBottom:"12px",display:"inline-block"})},"✓ PDF loaded — "+Math.round(state.pdfText.length/1000)+"k characters"):null;
+  var titleInp=inp({style:Object.assign({},C.inp,{marginBottom:"12px"}),placeholder:"e.g. Airway Management — Chapter 4",value:state.quizTitle});
+  titleInp.addEventListener("input",function(){state.quizTitle=titleInp.value;});
+  var fileInp=el("input",{type:"file",accept:".pdf",style:{display:"none"}});
+  fileInp.addEventListener("change",function(){if(fileInp.files[0])handlePdfUpload(fileInp.files[0]);});
+  var dropZone=div({style:{border:"2px dashed #ddd",borderRadius:"8px",padding:"2rem",textAlign:"center",marginBottom:"12px",cursor:"pointer"}},[
+    div({style:{fontSize:"24px",marginBottom:"8px"}},"📄"),
+    div({style:{fontSize:"14px",color:"#666"}},state.pdfText?"PDF loaded — ready to generate":"Click to select PDF"),
+    fileInp,
+  ]);
+  dropZone.addEventListener("click",function(){fileInp.click();});
+  var children=[h2({style:{fontSize:"18px",fontWeight:"600",marginBottom:"1rem"}},"Upload chapter PDF"),el("label",{style:C.label},"Quiz title"),titleInp,el("label",{style:C.label},"PDF file"),dropZone];
+  if(state.genStatus||state.generating){children.push(statusEl);if(progEl)children.push(progEl);}
+  if(loadedBadge)children.push(loadedBadge);
+  var genBtn=btn({style:Object.assign({},C.btnP,{opacity:(!state.pdfText||state.generating)?0.5:1})},state.generating?"Generating...":"Generate quiz (40 MCQs + 10 SAQs)");
+  genBtn.disabled=!state.pdfText||state.generating;
+  genBtn.addEventListener("click",generateQuiz);
+  children.push(div({style:{display:"flex",gap:"8px"}},[
+    (function(){var b=btn({style:C.btn},"Back");b.addEventListener("click",function(){setState({view:"adminDashboard"});});return b;})(),
+    genBtn,
+  ]));
+  return div({style:C.wrap},div({style:C.card},children));
+}
+
+function renderAdminDashboard() {
+  var mcqs=getMcqs(),saqs=getSaqs(),maxMCQ=getMaxMCQ(),maxSAQ=getMaxSAQ(),maxTotal=getMaxTotal();
+  if(!state.quiz) {
+    var children=[
+      div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"}},[
+        h1({style:{fontSize:"22px",fontWeight:"600"}},"Admin dashboard"),
+        (function(){var b=btn({style:C.btnS},"Home");b.addEventListener("click",function(){setState({view:"home"});});return b;})(),
+      ]),
+      div({style:C.card},[
+        div({style:{fontWeight:"600",marginBottom:"6px"}},"No active quiz"),
+        p({style:Object.assign({},C.muted,{marginBottom:"12px"})},"Upload a chapter PDF to create a new quiz."),
+        (function(){var b=btn({style:C.btnP},"Create new quiz");b.addEventListener("click",function(){setState({pdfText:"",quizTitle:"",genStatus:"",view:"upload"});});return b;})(),
+      ]),
+    ];
+    if(state.archived.length) {
+      children.push(div({style:{fontWeight:"600",fontSize:"15px",marginBottom:"10px"}},"Archived quizzes ("+state.archived.length+")"));
+      state.archived.forEach(function(entry,idx){
+        var am=(entry.quiz.questions||[]).filter(function(q){return q.type==="mcq";});
+        var as2=(entry.quiz.questions||[]).filter(function(q){return q.type==="saq";});
+        var c=div({style:Object.assign({},C.card,{marginBottom:"8px"})},[
+          div({style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},[
+            div([div({style:{fontWeight:"500"}},entry.quiz.title),div({style:C.muted},am.length+" MCQs · "+as2.length+" SAQs · "+entry.submissions.length+" submissions · "+entry.archivedAt)]),
+            (function(){var b=btn({style:C.btnS},"View");b.addEventListener("click",function(){setState({viewingArchive:idx,view:"archiveDetail"});});return b;})(),
+          ]),
+        ]);
+        children.push(c);
+      });
+    }
+    return div({style:C.wrap},children);
+  }
+
+  var tabs=["questions","residents","results","release","archive","settings"];
+  var tabBar=div({style:{display:"flex",gap:"6px",marginBottom:"16px",borderBottom:"1px solid #eee",paddingBottom:"12px",flexWrap:"wrap"}});
+  tabs.forEach(function(t){
+    var label=t==="archive"?"Archive"+(state.archived.length>0?" ("+state.archived.length+")":"")
+      :t==="residents"?"Residents"+(state.residents.length>0?" ("+state.residents.length+")":"")
+      :t==="results"?"Results"+(state.submissions.length>0?" ("+state.submissions.length+")":"")
+      :t.charAt(0).toUpperCase()+t.slice(1);
+    var active=state.activeTab===t;
+    var b=btn({style:Object.assign({},C.btnS,active?{borderColor:"#185FA5",color:"#185FA5",background:"#EBF3FB"}:{})},label);
+    b.addEventListener("click",function(){setState({activeTab:t});});
+    tabBar.appendChild(b);
+  });
+
+  var header=div({style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"16px"}},[
+    div([
+      h1({style:{fontSize:"22px",fontWeight:"600",marginBottom:"4px"}},state.quiz.title),
+      div({style:{display:"flex",gap:"8px",marginTop:"4px",flexWrap:"wrap",alignItems:"center"}},[
+        span({style:bdg(state.quiz.published?"green":"amber")},state.quiz.published?"Published":"Draft"),
+        span({style:C.muted},"Code: "+state.quiz.code),
+        span({style:C.muted},mcqs.length+" MCQs ("+maxMCQ+"m) · "+saqs.length+" SAQs ("+maxSAQ+"m) · Total: "+maxTotal+"m"),
+      ]),
+    ]),
+    (function(){var b=btn({style:C.btnS},"Home");b.addEventListener("click",function(){setState({view:"home"});});return b;})(),
+  ]);
+
+  var content=renderTabContent(mcqs,saqs,maxMCQ,maxSAQ,maxTotal);
+  return div({style:C.wrap},[header,tabBar,content]);
+}
+
+function renderTabContent(mcqs,saqs,maxMCQ,maxSAQ,maxTotal) {
+  var t=state.activeTab;
+
+  if(t==="questions") {
+    var children=[div({style:Object.assign({},C.muted,{marginBottom:"12px"})},mcqs.length+" MCQs · "+saqs.length+" SAQs")];
+    state.quiz.questions.forEach(function(q,i){
+      var qd=div({style:Object.assign({},C.card,{marginBottom:"8px"})},[
+        div({style:{display:"flex",justifyContent:"space-between",marginBottom:"4px"}},[
+          span({style:C.muted},"Q"+(i+1)),
+          div({style:{display:"flex",gap:"6px"}},[
+            span({style:bdg(q.type==="mcq"?"blue":"amber")},q.type.toUpperCase()),
+            q.questionSubtype?span({style:Object.assign({},bdg("gray"),{fontSize:"11px"})},q.questionSubtype.replace("_"," ")):null,
+            span({style:Object.assign({},bdg("green"),{fontSize:"11px"})},q.marks+"m"),
+          ].filter(Boolean)),
+        ]),
+        div({style:{fontSize:"14px",marginBottom:q.options?"8px":"0"}},q.text),
+      ]);
+      if(q.options) qd.appendChild(div({style:{fontSize:"13px",color:"#666"}},q.options.join(" · ")+" ✓ "+q.answer));
+      if(q.type==="saq") qd.appendChild(div({style:{fontSize:"13px",color:"#666",marginTop:"4px"}},"Sample: "+(q.sampleAnswer||"").slice(0,120)+"..."));
+      children.push(qd);
+    });
+    if(!state.quiz.published){
+      var pb=btn({style:Object.assign({},C.btnP,{marginTop:"8px"})},"Publish quiz");
+      pb.addEventListener("click",function(){
+        var updated=Object.assign({},state.quiz,{published:true});
+        api({action:"saveQuiz",quizData:JSON.stringify(updated)}).catch(function(){});
+        setState({quiz:updated});
+      });
+      children.push(pb);
+    }
+    return div({},children);
+  }
+
+  if(t==="residents") {
+    var nameInp=inp({style:C.inp,placeholder:"Dr. Jane Smith",value:state.newResName});
+    nameInp.addEventListener("input",function(){state.newResName=nameInp.value;});
+    var emailInp=inp({style:C.inp,placeholder:"jane@hospital.com",value:state.newResEmail});
+    emailInp.addEventListener("input",function(){state.newResEmail=emailInp.value;});
+    var addBtn=btn({style:Object.assign({},C.btnP,{whiteSpace:"nowrap"})},"Add");
+    addBtn.addEventListener("click",function(){
+      if(!state.newResName.trim()||!state.newResEmail.trim())return;
+      var updated=state.residents.concat([{name:state.newResName.trim(),email:state.newResEmail.trim(),residentCode:genCode()}]);
+      api({action:"saveResidents",residents:JSON.stringify(updated)}).catch(function(){});
+      setState({residents:updated,newResName:"",newResEmail:""});
+    });
+    var formCard=div({style:C.card},[
+      h3({style:{fontSize:"15px",fontWeight:"600",marginBottom:"8px"}},"Register residents"),
+      p({style:Object.assign({},C.muted,{marginBottom:"12px"})},"Each resident gets a unique private code."),
+      div({style:{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:"8px",alignItems:"end"}},[
+        div([el("label",{style:C.label},"Full name"),nameInp]),
+        div([el("label",{style:C.label},"Email"),emailInp]),
+        addBtn,
+      ]),
+    ]);
+    if(!state.residents.length) return div({},[formCard,div({style:C.muted},"No residents registered yet.")]);
+    var rows=state.residents.map(function(r,i){
+      var sub=state.submissions.find(function(s){return s.residentCode===r.residentCode;});
+      var removeBtn=btn({style:C.btnS},"Remove");
+      removeBtn.addEventListener("click",function(){
+        var updated=state.residents.filter(function(x){return x.residentCode!==r.residentCode;});
+        api({action:"saveResidents",residents:JSON.stringify(updated)}).catch(function(){});
+        setState({residents:updated});
+      });
+      return [{content:i+1},{content:r.name},{content:r.email},
+        {content:codeBadge(r.residentCode)},
+        {content:span({style:bdg(sub?"green":"gray")},sub?"Submitted":"Pending")},
+        {content:removeBtn}];
+    });
+    return div({},[formCard,makeTable([{label:"#"},{label:"Name"},{label:"Email"},{label:"Resident code"},{label:"Status"},{}],rows)]);
+  }
+
+  if(t==="results") {
+    var scored=state.submissions.filter(function(s){return s.totalScore!==null;});
+    var avg=scored.length?Math.round(scored.reduce(function(a,s){return a+s.totalScore;},0)/scored.length):null;
+    var avgPct=avg!==null?Math.round((avg/maxTotal)*100):null;
+    var hdr=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}},[
+      div({style:C.muted},state.submissions.length+" submission(s)"),
+      div({style:{display:"flex",gap:"8px"}},[
+        (function(){var b=btn({style:C.btnS},"↻ Refresh");b.addEventListener("click",refreshSubmissions);return b;})(),
+        state.submissions.length&&!state.marking?(function(){var b=btn({style:C.btnP},"Mark SAQs with AI");b.addEventListener("click",markSAQs);return b;})():null,
+      ].filter(Boolean)),
+    ]);
+    var children=[hdr];
+    if(state.marking){
+      children.push(div({style:{marginBottom:"12px"}},[
+        div({style:C.muted},"AI marking SAQs... "+state.markProgress+"%"),
+        div({style:C.prog},div({style:Object.assign({},C.bar(state.markProgress),{transition:"width 0.4s"})})),
+      ]));
+    }
+    if(!state.submissions.length){children.push(div({style:C.muted},"No submissions yet. Share quiz code "+state.quiz.code+" with residents."));return div({},children);}
+    var rows=state.submissions.map(function(sub,i){
+      var saqT=Object.values(sub.saqScores).reduce(function(a,b){return a+b;},0);
+      var pct=sub.totalScore!==null?Math.round((sub.totalScore/maxTotal)*100):null;
+      return [{content:i+1},{content:codeBadge(sub.residentCode)},{content:sub.name},{content:sub.email},{content:sub.submitted},
+        {content:sub.mcqScore},{content:Object.keys(sub.saqScores).length>0?saqT:"—"},
+        {content:sub.totalScore!==null?sub.totalScore:"—",bold:true},{content:scoreBadge(pct)}];
+    });
+    children.push(makeTable([{label:"#"},{label:"Code"},{label:"Name"},{label:"Email"},{label:"Submitted"},
+      {label:"MCQ ("+maxMCQ+")",right:true},{label:"SAQ ("+maxSAQ+")",right:true},{label:"Total ("+maxTotal+")",right:true},{label:"%",right:true}],
+      rows,avg!==null?[{content:"Class average",span:7},{content:avg,bold:true},{content:scoreBadge(avgPct)}]:null));
+    return div({},children);
+  }
+
+  if(t==="release") {
+    var links=div({style:C.card},[h3({style:{fontSize:"15px",fontWeight:"600",marginBottom:"8px"}},"Shareable links"),p({style:Object.assign({},C.muted,{marginBottom:"12px"})},"Share these directly with residents.")]);
+    ["take","results"].forEach(function(type){
+      var url=getPageUrl(type);
+      var label=type==="take"?"Take the quiz":"Check my results";
+      var copyBtn=btn({style:C.btnP},"Copy");
+      copyBtn.addEventListener("click",function(){copyText(url);});
+      links.appendChild(div({style:{marginBottom:"12px",padding:"12px 14px",background:"#f8f8f6",borderRadius:"8px",border:"1px solid #eee"}},[
+        div({style:{fontWeight:"600",fontSize:"13px",marginBottom:"4px"}},label),
+        div({style:{display:"flex",gap:"8px",alignItems:"center"}},[
+          code({style:{fontSize:"12px",flex:"1",wordBreak:"break-all",color:"#555",background:"#eee",padding:"4px 8px",borderRadius:"4px",display:"inline-block"}},url),
+          copyBtn,
+        ]),
+      ]));
+    });
+    var relCard=div({style:C.card},[
+      h3({style:{fontSize:"15px",fontWeight:"600",marginBottom:"8px"}},"Release results"),
+      p({style:Object.assign({},C.muted,{marginBottom:"12px"})},"Once released, residents can view scores and feedback using their resident code."),
+      span({style:Object.assign({},bdg(state.resultsReleased?"green":"amber"),{display:"inline-block",marginBottom:"16px"})},state.resultsReleased?"Results are live":"Results are held back"),
+    ]);
+    if(!state.resultsReleased){
+      var relBtn=btn({style:C.btnP},"Release results to residents");
+      relBtn.addEventListener("click",function(){api({action:"saveReleased",released:"true"}).catch(function(){});setState({resultsReleased:true});});
+      relCard.appendChild(relBtn);
+    } else {
+      relCard.appendChild(div({style:{fontSize:"13px",padding:"10px 14px",background:"#f8f8f6",borderRadius:"8px",marginBottom:"16px",border:"1px solid #eee"}},[
+        el("strong",{},"Email template: "),
+        "Results for "+state.quiz.title+" are now available. Visit "+getPageUrl("results")+" and enter your resident code.",
+      ]));
+      relCard.appendChild(div({style:{borderTop:"1px solid #eee",paddingTop:"16px"}},[
+        div({style:{fontWeight:"600",fontSize:"14px",marginBottom:"6px"}},"Archive this quiz"),
+        p({style:Object.assign({},C.muted,{marginBottom:"10px"})},"Archives quiz and frees the active slot."),
+        (function(){var b=btn({style:Object.assign({},C.btnP,{background:"#3B6D11"})},"Archive quiz");b.addEventListener("click",archiveQuiz);return b;})(),
+      ]));
+    }
+    return div({},[links,relCard]);
+  }
+
+  if(t==="archive") {
+    if(!state.archived.length)return div({style:C.muted},"No archived quizzes yet.");
+    var children=[];
+    state.archived.forEach(function(entry,idx){
+      var am=(entry.quiz.questions||[]).filter(function(q){return q.type==="mcq";});
+      var as2=(entry.quiz.questions||[]).filter(function(q){return q.type==="saq";});
+      var vb=btn({style:C.btnS},"View");
+      vb.addEventListener("click",function(){setState({viewingArchive:idx,view:"archiveDetail"});});
+      children.push(div({style:Object.assign({},C.card,{marginBottom:"8px"})},[
+        div({style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},[
+          div([div({style:{fontWeight:"500"}},entry.quiz.title),div({style:C.muted},am.length+" MCQs · "+as2.length+" SAQs · "+entry.submissions.length+" submissions · "+entry.archivedAt)]),
+          vb,
+        ]),
+      ]));
+    });
+    return div({},children);
+  }
+
+  if(t==="settings") {
+    var card=div({style:C.card},[
+      h3({style:{fontSize:"15px",fontWeight:"600",marginBottom:"8px"}},"Change admin code"),
+      p({style:Object.assign({},C.muted,{marginBottom:"16px"})},"Your new code will be saved to this browser."),
+    ]);
+    if(state.changeSuccess){
+      card.appendChild(span({style:Object.assign({},bdg("green"),{display:"inline-block",marginBottom:"12px"})},"Admin code updated successfully"));
+      var db=btn({style:C.btn},"Done");
+      db.addEventListener("click",function(){setState({changeSuccess:false,changeStep:1});});
+      card.appendChild(db);
+    } else if(state.changeStep===1) {
+      var oi=inp({style:Object.assign({},C.inp,{marginBottom:"8px"}),type:"password",placeholder:"Enter current code",value:state.changeOld});
+      oi.addEventListener("input",function(){state.changeOld=oi.value;});
+      card.appendChild(oi);
+      if(state.changeError)card.appendChild(div({style:C.err},state.changeError));
+      var vb=btn({style:Object.assign({},C.btnP,{marginTop:"8px"})},"Verify");
+      vb.addEventListener("click",function(){if(state.changeOld!==state.adminPassword){setState({changeError:"Incorrect code."});return;}setState({changeError:"",changeStep:2});});
+      card.appendChild(vb);
+    } else {
+      var ni=inp({style:Object.assign({},C.inp,{marginBottom:"12px"}),type:"password",placeholder:"Min 6 characters",value:state.changeNew});
+      ni.addEventListener("input",function(){state.changeNew=ni.value;});
+      var ci=inp({style:Object.assign({},C.inp,{marginBottom:"8px"}),type:"password",placeholder:"Re-enter new code",value:state.changeConfirm});
+      ci.addEventListener("input",function(){state.changeConfirm=ci.value;});
+      card.appendChild(ni); card.appendChild(ci);
+      if(state.changeError)card.appendChild(div({style:C.err},state.changeError));
+      var bb=btn({style:C.btn},"Back");bb.addEventListener("click",function(){setState({changeStep:1,changeError:"" });});
+      var sb=btn({style:C.btnP},"Save new code");
+      sb.addEventListener("click",function(){
+        if(state.changeNew.length<6){setState({changeError:"Min 6 characters."});return;}
+        if(state.changeNew!==state.changeConfirm){setState({changeError:"Codes don't match."});return;}
+        localStorage.setItem(ADMIN_KEY,state.changeNew);
+        setState({adminPassword:state.changeNew,changeOld:"",changeNew:"",changeConfirm:"",changeError:"",changeStep:1,changeSuccess:true});
+      });
+      card.appendChild(div({style:{display:"flex",gap:"8px",marginTop:"8px"}},[bb,sb]));
+    }
+    return card;
+  }
+  return div({});
+}
+
+function renderArchiveDetail() {
+  var entry=state.archived[state.viewingArchive];
+  if(!entry)return div({style:C.wrap},p({style:C.muted},"Not found."));
+  var aMcqs=(entry.quiz.questions||[]).filter(function(q){return q.type==="mcq";});
+  var aSaqs=(entry.quiz.questions||[]).filter(function(q){return q.type==="saq";});
+  var aMaxMCQ=aMcqs.length*2,aMaxSAQ=aSaqs.reduce(function(a,q){return a+q.marks;},0),aMax=aMaxMCQ+aMaxSAQ;
+  var backBtn=btn({style:C.btnS},"Back");
+  backBtn.addEventListener("click",function(){setState({view:"adminDashboard",activeTab:"archive"});});
+  var hdr=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}},[
+    div([h1({style:{fontSize:"22px",fontWeight:"600"}},entry.quiz.title),div({style:C.muted},"Archived "+entry.archivedAt+" · Code: "+entry.quiz.code)]),
+    backBtn,
+  ]);
+  if(!entry.submissions.length)return div({style:C.wrap},[hdr,div({style:C.muted},"No submissions.")]);
+  var rows=entry.submissions.map(function(sub,i){
+    var saqT=Object.values(sub.saqScores||{}).reduce(function(a,b){return a+b;},0);
+    var pct=sub.totalScore!==null?Math.round((sub.totalScore/aMax)*100):null;
+    return [{content:i+1},{content:codeBadge(sub.residentCode)},{content:sub.name},{content:sub.email},
+      {content:sub.mcqScore},{content:saqT||"—"},{content:sub.totalScore!==null?sub.totalScore:"—",bold:true},{content:scoreBadge(pct)}];
+  });
+  return div({style:C.wrap},[hdr,makeTable([{label:"#"},{label:"Code"},{label:"Name"},{label:"Email"},
+    {label:"MCQ ("+aMaxMCQ+")",right:true},{label:"SAQ ("+aMaxSAQ+")",right:true},{label:"Total ("+aMax+")",right:true},{label:"%",right:true}],rows)]);
+}
+
+function renderStudentEntry() {
+  if(state.loading)return div({style:C.wrap},div({style:Object.assign({},C.card,{textAlign:"center",padding:"2rem"})},[
+    div({style:{fontSize:"14px",color:"#666",marginBottom:"12px"}},"Loading quiz data..."),
+    div({style:C.prog},div({style:Object.assign({},C.bar(100))})),
+  ]));
+  var qcInp=inp({style:Object.assign({},C.inp,{marginBottom:"12px"}),placeholder:"e.g. QUIZ4X7KM",value:state.studentQuizCode});
+  qcInp.addEventListener("input",function(){state.studentQuizCode=qcInp.value.toUpperCase();});
+  var rcInp=inp({style:Object.assign({},C.inp,{marginBottom:"16px"}),placeholder:"e.g. EM4X72",value:state.studentResCode});
+  rcInp.addEventListener("input",function(){state.studentResCode=rcInp.value.toUpperCase();});
+  var errEl=state.entryError?div({style:C.err},state.entryError):null;
+  function tryBegin(){
+    if(!state.quiz){
+      setState({entryError:"Quiz data is still loading. Please wait a moment and try again."});
+      Promise.all([
+        api({action:"getQuiz"}).then(function(r){if(r.ok&&r.quizData)state.quiz=JSON.parse(r.quizData);}).catch(function(){}),
+        api({action:"getResidents"}).then(function(r){if(r.ok&&r.residents)state.residents=JSON.parse(r.residents);}).catch(function(){}),
+      ]).then(function(){setState({entryError:""});});
+      return;
+    }
+    if(state.studentQuizCode!==state.quiz.code){setState({entryError:"Invalid quiz code."});return;}
+    if(!state.quiz.published){setState({entryError:"Quiz not published yet."});return;}
+    var res=state.residents.find(function(r){return r.residentCode===state.studentResCode;});
+    if(!res){
+      api({action:"getResidents"}).then(function(r){
+        if(r.ok&&r.residents){
+          var fresh=JSON.parse(r.residents);
+          state.residents=fresh;
+          var found=fresh.find(function(x){return x.residentCode===state.studentResCode;});
+          if(!found){setState({entryError:"Resident code not found. Check with your instructor."});return;}
+          setState({currentAnswers:{},entryError:"",view:"quiz"});
+          startTimer();
+        }
+      }).catch(function(){setState({entryError:"Network error. Please try again."});});
+      return;
+    }
+    if(state.submissions.find(function(s){return s.residentCode===state.studentResCode;})){setState({entryError:"You have already submitted this quiz."});return;}
+    setState({currentAnswers:{},entryError:"",view:"quiz"});
+    startTimer();
+  }
+  var beginBtn=btn({style:C.btnP},"Begin quiz");
+  beginBtn.addEventListener("click",tryBegin);
+  var backBtn=btn({style:C.btn},"Back");
+  backBtn.addEventListener("click",function(){setState({view:"home"});});
+  var children=[
+    h2({style:{fontSize:"18px",fontWeight:"600",marginBottom:"1rem"}},"Start quiz"),
+    span({style:Object.assign({},bdg("blue"),{display:"inline-block",marginBottom:"16px"})},"45 minutes · 40 MCQs · 10 SAQs"),
+    el("label",{style:C.label},"Quiz code"),qcInp,
+    el("label",{style:C.label},"Your resident code"),rcInp,
+  ];
+  if(errEl)children.push(errEl);
+  children.push(div({style:{display:"flex",gap:"8px"}},[backBtn,beginBtn]));
+  return div({style:C.wrap},div({style:C.card},children));
+}
+
+function renderQuiz() {
+  var mcqs=getMcqs(),saqs=getSaqs(),allQs=state.quiz.questions;
+  var answered=Object.keys(state.currentAnswers).filter(function(k){return state.currentAnswers[k];}).length;
+  var res=getActiveResident();
+  var timerColor=state.timerLeft<300?"#A32D2D":state.timerLeft<600?"#854F0B":"#185FA5";
+
+  var header=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0",position:"sticky",top:"0",background:"#f8f8f6",zIndex:"10",borderBottom:"1px solid #eee",marginBottom:"8px"}},[
+    div([
+      div({style:{fontWeight:"600",fontSize:"15px"}},state.quiz.title),
+      div({style:C.muted},(res?res.name:"")+" · "+answered+"/"+allQs.length+" answered"),
+    ]),
+    div({style:{display:"flex",alignItems:"center",gap:"10px"}},[
+      el("span",{id:"quiz-timer",style:{fontSize:"18px",fontWeight:"700",color:timerColor,fontVariantNumeric:"tabular-nums",letterSpacing:"1px"}},fmtTime(state.timerLeft)),
+      div({style:{width:"80px",height:"5px",borderRadius:"4px",background:"#eee",overflow:"hidden"}},
+        div({id:"quiz-timer-bar",style:Object.assign({},C.bar(Math.round((state.timerLeft/QUIZ_DURATION)*100)),{background:timerColor})})),
+    ]),
+  ]);
+
+  var pct=Math.round((answered/allQs.length)*100);
+  var prog=div({style:C.prog},div({style:Object.assign({},C.bar(pct),{transition:"width 0.3s"})}));
+
+  var mcqSection=div({},[div({style:{fontWeight:"600",fontSize:"15px",margin:"1.25rem 0 0.75rem"}},"Section A — Multiple Choice ")]);
+  mcqSection.firstChild.appendChild(span({style:Object.assign({},C.muted,{fontWeight:"400"})},"(2 marks each)"));
+  mcqs.forEach(function(q,i){
+    var qCard=div({style:Object.assign({},C.card,{marginBottom:"12px"})});
+    qCard.appendChild(div({style:{display:"flex",justifyContent:"space-between",marginBottom:"8px"}},[span({style:C.muted},"Q"+(i+1)+" of "+mcqs.length),span({style:bdg("blue")},"2 marks")]));
+    qCard.appendChild(div({style:{fontSize:"15px",fontWeight:"500",marginBottom:"12px",lineHeight:"1.5"}},q.text));
+    q.options.forEach(function(opt){
+      var sel=state.currentAnswers[q.id]===opt;
+      var ob=btn({style:optStyle(sel)},opt);
+      ob.addEventListener("click",function(){
+        var newAnswers=Object.assign({},state.currentAnswers);
+        newAnswers[q.id]=opt;
+        state.currentAnswers=newAnswers;
+        // Update only this button's styles without full re-render
+        var allOpts=qCard.querySelectorAll("button");
+        allOpts.forEach(function(b){
+          var bOpt=b.textContent;
+          var bSel=newAnswers[q.id]===bOpt;
+          Object.assign(b.style,optStyle(bSel));
+        });
+        // Update answered count
+        var ans2=Object.keys(state.currentAnswers).filter(function(k){return state.currentAnswers[k];}).length;
+        var hdrMuted=document.querySelector("#root .muted-answered");
+        if(hdrMuted)hdrMuted.textContent=(res?res.name:"")+" · "+ans2+"/"+allQs.length+" answered";
+        var progBar=document.querySelector("#root .prog-bar");
+        if(progBar)progBar.style.width=Math.round((ans2/allQs.length)*100)+"%";
+      });
+      qCard.appendChild(ob);
+    });
+    mcqSection.appendChild(qCard);
+  });
+
+  var saqSection=div({},[div({style:{fontWeight:"600",fontSize:"15px",margin:"1.5rem 0 0.75rem"}},"Section B — Short Answer Questions ")]);
+  saqSection.firstChild.appendChild(span({style:Object.assign({},C.muted,{fontWeight:"400"})},"(variable marks)"));
+  saqs.forEach(function(q,i){
+    var qCard=div({style:Object.assign({},C.card,{marginBottom:"12px"})});
+    qCard.appendChild(div({style:{display:"flex",justifyContent:"space-between",marginBottom:"8px"}},[span({style:C.muted},"SAQ "+(i+1)+" of "+saqs.length),span({style:bdg("amber")},q.marks+" marks")]));
+    qCard.appendChild(div({style:{fontSize:"15px",fontWeight:"500",marginBottom:"10px",whiteSpace:"pre-line",lineHeight:"1.5"}},q.text));
+    var textarea=ta({style:C.ta,placeholder:"Write your structured answer here...",value:state.currentAnswers[q.id]||""});
+    textarea.addEventListener("input",function(){state.currentAnswers[q.id]=textarea.value;});
+    qCard.appendChild(textarea);
+    saqSection.appendChild(qCard);
+  });
+
+  var submitDiv=div({style:{textAlign:"right",padding:"1rem 0 2rem"}});
+  var submitBtn=btn({style:C.btnP},"Submit quiz");
+  submitBtn.addEventListener("click",submitQuiz);
+  submitDiv.appendChild(submitBtn);
+
+  // Add class for targeted updates
+  header.querySelector(".muted") && (header.querySelector(".muted").className="muted muted-answered");
+  prog.firstChild.className="prog-bar";
+
+  return div({style:C.wrap},[header,prog,mcqSection,saqSection,submitDiv]);
+}
+
+function renderSubmitted() {
+  var res=getActiveResident();
+  return div({style:C.wrap},div({style:Object.assign({},C.card,{textAlign:"center",padding:"3rem"})},[
+    div({style:{fontSize:"48px",marginBottom:"16px"}},"✅"),
+    h2({style:{fontSize:"18px",fontWeight:"600",textAlign:"center",marginBottom:"12px"}},"Submitted successfully"),
+    p({style:Object.assign({},C.muted,{marginBottom:"8px"})},"Thank you, "+(res?res.name:"")+". Your answers have been recorded."),
+    p({style:C.muted},"Results will be released by your instructor. Save your resident code: "),
+    div({style:{fontWeight:"700",color:"#185FA5",fontSize:"18px",margin:"8px 0 20px"}},res?res.residentCode:""),
+    (function(){var b=btn({style:C.btn},"Back to home");b.addEventListener("click",function(){setState({view:"home"});});return b;})(),
+  ]));
+}
+
+function renderCheckResults() {
+  var rcInp=inp({style:Object.assign({},C.inp,{marginBottom:"16px"}),placeholder:"e.g. EM4X72",value:state.resCodeLookup});
+  rcInp.addEventListener("input",function(){state.resCodeLookup=rcInp.value.toUpperCase();});
+  var errEl=state.lookupError?div({style:C.err},state.lookupError):null;
+  var backBtn=btn({style:C.btn},"Back");backBtn.addEventListener("click",function(){setState({view:"home"});});
+  var viewBtn=btn({style:C.btnP},"View results");
+  viewBtn.addEventListener("click",function(){
+    setState({lookupError:""});
+    api({action:"getSubmissions"}).then(function(r){
+      if(!r.ok){setState({lookupError:"Could not fetch results. Please try again."});return;}
+      var allSubs=(r.submissions||[]).map(parseSub);
+      state.submissions=allSubs;
+      var sub=allSubs.find(function(s){return s.residentCode===state.resCodeLookup;});
+      if(!sub){setState({lookupError:"No submission found for this code."});return;}
+      api({action:"getReleased"}).then(function(rel){
+        if(rel.released!=="true"){setState({lookupError:"Results have not been released yet. Please check back later."});return;}
+        setState({resultsReleased:true,submittedId:sub.id,view:"results"});
+      }).catch(function(){setState({lookupError:"Could not check release status."});});
+    }).catch(function(){setState({lookupError:"Network error. Please try again."});});
+  });
+  var children=[h2({style:{fontSize:"18px",fontWeight:"600",marginBottom:"1rem"}},"Check my results"),el("label",{style:C.label},"Your resident code"),rcInp];
+  if(errEl)children.push(errEl);
+  children.push(div({style:{display:"flex",gap:"8px"}},[backBtn,viewBtn]));
+  return div({style:C.wrap},div({style:C.card},children));
+}
+
+function renderResults() {
+  var currentSub=getCurrentSub();
+  if(!currentSub)return div({style:C.wrap},p({style:C.muted},"Loading...");
+  var mcqs=getMcqs(),saqs=getSaqs(),maxMCQ=getMaxMCQ(),maxSAQ=getMaxSAQ(),maxTotal=getMaxTotal();
+  var saqT=Object.values(currentSub.saqScores).reduce(function(a,b){return a+b;},0);
+  var total=currentSub.mcqScore+saqT,pct=Math.round((total/maxTotal)*100);
+
+  var homeBtn=btn({style:C.btnS},"Home");homeBtn.addEventListener("click",function(){setState({view:"home"});});
+  var dlBtn=btn({style:C.btnP},"⬇ Download");dlBtn.addEventListener("click",downloadResults);
+
+  var hdr=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}},[
+    div([h1({style:{fontSize:"22px",fontWeight:"600"}},"Results"),div({style:C.muted},currentSub.name+" · Code: "+currentSub.residentCode)]),
+    div({style:{display:"flex",gap:"8px"}},[homeBtn,dlBtn]),
+  ]);
+
+  var scoreGrid=div({style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"12px",marginBottom:"24px"}});
+  [["MCQ",currentSub.mcqScore+"/"+maxMCQ],["SAQ",saqT+"/"+maxSAQ],["Total",total+"/"+maxTotal],["Score",pct+"%"]].forEach(function(item){
+    scoreGrid.appendChild(div({style:{background:"#fff",border:"1px solid #e8e6df",borderRadius:"10px",padding:"1rem",textAlign:"center",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}},[
+      div({style:{fontSize:"12px",color:"#666",marginBottom:"6px",textTransform:"uppercase",letterSpacing:"0.5px"}},item[0]),
+      div({style:{fontSize:"22px",fontWeight:"700",color:"#185FA5"}},item[1]),
+    ]));
+  });
+
+  var mcqHdr=div({style:{fontWeight:"600",marginBottom:"10px",fontSize:"15px"}},"Section A — MCQ Review");
+  var mcqList=div({});
+  mcqs.forEach(function(q,i){
+    var ans=(currentSub.answers[q.id]||"").trim().toUpperCase().charAt(0);
+    var correct=ans===q.answer.trim().toUpperCase().charAt(0);
+    var qd=div({style:Object.assign({},C.card,{marginBottom:"8px",borderLeft:"4px solid "+(correct?"#3B6D11":"#A32D2D")})});
+    qd.appendChild(div({style:{display:"flex",justifyContent:"space-between",marginBottom:"4px"}},[span({style:C.muted},"Q"+(i+1)),span({style:{fontSize:"13px",color:correct?"#3B6D11":"#A32D2D",fontWeight:"600"}},correct?"+2 marks":"0 marks")]));
+    qd.appendChild(div({style:{fontSize:"14px",fontWeight:"500",marginBottom:"8px",lineHeight:"1.5"}},q.text));
+    var ansLine=div({style:{fontSize:"13px",marginBottom:q.explanation?"8px":"0"}});
+    ansLine.appendChild(document.createTextNode("Your answer: "));
+    ansLine.appendChild(span({style:{color:correct?"#3B6D11":"#A32D2D",fontWeight:"600"}},currentSub.answers[q.id]||"—"));
+    if(!correct){ansLine.appendChild(document.createTextNode(" · Correct: "));ansLine.appendChild(span({style:{color:"#3B6D11",fontWeight:"600"}},q.answer));}
+    qd.appendChild(ansLine);
+    if(q.explanation)qd.appendChild(div({style:{fontSize:"13px",color:"#444",background:"#f8f8f6",borderRadius:"6px",padding:"8px 12px",lineHeight:"1.5"}},[el("strong",{},"Explanation: "),q.explanation]));
+    mcqList.appendChild(qd);
+  });
+
+  var saqHdr=div({style:{fontWeight:"600",margin:"20px 0 10px",fontSize:"15px"}},"Section B — SAQ Feedback");
+  var saqList=div({});
+  saqs.forEach(function(q,i){
+    var sc=currentSub.saqScores[q.id];
+    var qd=div({style:Object.assign({},C.card,{marginBottom:"10px"})});
+    qd.appendChild(div({style:{display:"flex",justifyContent:"space-between",marginBottom:"4px"}},[span({style:C.muted},"SAQ "+(i+1)),span({style:{fontSize:"13px",fontWeight:"600"}},(sc!==undefined?sc:"—")+"/"+q.marks+" marks")]));
+    qd.appendChild(div({style:{fontSize:"14px",fontWeight:"500",marginBottom:"8px",whiteSpace:"pre-line",lineHeight:"1.5"}},q.text));
+    qd.appendChild(div({style:{fontSize:"13px",color:"#444",marginBottom:"10px",background:"#f8f8f6",borderRadius:"6px",padding:"8px 12px",lineHeight:"1.5"}},[el("strong",{},"Your answer: "),currentSub.answers[q.id]||"(no answer)"]));
+    if(currentSub.saqFeedback[q.id])qd.appendChild(div({style:{fontSize:"13px",color:"#185FA5",marginBottom:"8px",lineHeight:"1.5"}},[el("strong",{},"Feedback: "),currentSub.saqFeedback[q.id]]));
+    if(q.explanation)qd.appendChild(div({style:{fontSize:"13px",color:"#444",background:"#f8f8f6",borderRadius:"6px",padding:"8px 12px",lineHeight:"1.5"}},[el("strong",{},"Model answer: "),q.explanation]));
+    saqList.appendChild(qd);
+  });
+
+  return div({style:C.wrap},[hdr,scoreGrid,mcqHdr,mcqList,saqHdr,saqList]);
+}
+
+// ── Boot ───────────────────────────────────────────────────────
+loadAll();
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>EM Board Quiz Platform</title>
