@@ -786,7 +786,16 @@ function App() {
     </div>;
   }
 
-  if(view==="studentEntry") return (
+  if(view==="studentEntry") {
+    if(loading) return (
+      <div style={S.wrap}>
+        <div style={Object.assign({},S.card,{textAlign:"center",padding:"2rem"})}>
+          <div style={{fontSize:14,color:"#666"}}>Loading quiz data...</div>
+          <div style={Object.assign({},S.prog,{marginTop:12})}><div style={S.bar(100,"#185FA5")}/></div>
+        </div>
+      </div>
+    );
+    return (
     <div style={S.wrap}>
       <div style={S.card}>
         <h2 style={S.h2}>Start quiz</h2>
