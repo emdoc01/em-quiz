@@ -34,10 +34,11 @@ var QUIZ_DURATION = 45 * 60;
 
 // ── Utilities ──────────────────────────────────────────────────
 function api(body) {
-  return fetch(BACKEND + "?action=" + body.action, {
-    method: "POST", headers: {"Content-Type": "text/plain"},
-    body: JSON.stringify(body)
-  }).then(function(r){return r.json();});
+  // Encode body as a URL param to use GET (avoids CORS preflight)
+  var encoded = encodeURIComponent(JSON.stringify(body));
+  return fetch(BACKEND + "?action=" + body.action + "&payload=" + encoded, {
+    method: "GET",
+  }).then(function(r){ return r.json(); });
 }
 
 function genCode() {
