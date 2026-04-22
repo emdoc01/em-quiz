@@ -21,7 +21,7 @@ code{font-family:monospace}
 <div id="root"><div style="text-align:center;padding:5rem 1rem;font-family:sans-serif;color:#666">
   <div style="font-size:32px;margin-bottom:12px">⚕</div>
   <div style="font-size:16px;font-weight:500;margin-bottom:8px">EM Board Quiz Platform</div>
-  <div style="font-size:14px">Loading...</div>
+  <div id="load-status" style="font-size:14px">Connecting to backend...</div>
 </div></div>
 <script>
 // ── Minimal React-like implementation ──────────────────────────
@@ -34,11 +34,31 @@ var QUIZ_DURATION = 45 * 60;
 
 // ── Utilities ──────────────────────────────────────────────────
 function api(body) {
-  // Encode body as a URL param to use GET (avoids CORS preflight)
   var encoded = encodeURIComponent(JSON.stringify(body));
-  return fetch(BACKEND + "?action=" + body.action + "&payload=" + encoded, {
-    method: "GET",
-  }).then(function(r){ return r.json(); });
+  return fetch(BACKEND + "?action=" + body.action + "&payload=" + encoded)
+    .then(function(r){
+      if(!r.ok) throw new Error("HTTP " + r.status);
+      return r.text();
+    })
+    .then(function(text){
+      try { return JSON.parse(text); }
+      catch(e){ throw new Error("Bad JSON: " + text.slice(0,200)); }
+    });
+}
+
+function testBackend() {
+  var statusEl = document.getElementById("load-status");
+  if(statusEl) statusEl.textContent = "Connecting to backend...";
+  return fetch(BACKEND + "?action=ping&payload=" + encodeURIComponent(JSON.stringify({action:"ping"})))
+    .then(function(r){ return r.text(); })
+    .then(function(t){
+      if(statusEl) statusEl.textContent = "Backend OK. Loading data...";
+      return true;
+    })
+    .catch(function(err){
+      if(statusEl) statusEl.innerHTML = "<span style='color:#A32D2D'>Backend error: " + err.message + "<br>Check browser console (F12) for details.</span>";
+      return false;
+    });
 }
 
 function genCode() {
@@ -1135,7 +1155,9 @@ function renderResults() {
 }
 
 // ── Boot ───────────────────────────────────────────────────────
-loadAll();
+testBackend().then(function(ok){
+  if(ok) loadAll();
+});
 </script>
 </body>
 </html>
